@@ -1417,8 +1417,8 @@ function getCarProfile() {
 function applyPlayerCarTuning() {
   const profile = getCarProfile();
   const conditionFactor = lerp(0.45, 1, state.carCondition / 100);
-  player.maxSpeed = (40 + profile.maxSpeedBonus + state.engineLevel * 5) * conditionFactor;
-  player.acceleration = 25 + profile.accelBonus + state.engineLevel * 4;
+  player.maxSpeed = (50 + profile.maxSpeedBonus + state.engineLevel * 7) * conditionFactor;
+  player.acceleration = 31 + profile.accelBonus + state.engineLevel * 5;
   player.turnRate = 1.45 + state.handlingLevel * 0.16;
   player.mesh.bodyMaterial.color.setHex(profile.color);
 }
@@ -1785,6 +1785,7 @@ function renderPhonePanel() {
         <div class="mini">Current Location: ${getDistrictName(playerReference)}</div>
         <div class="mini">Wanted Level: ${state.wantedLevel}</div>
         <div class="mini">Job: ${state.currentJobId ? placeById.get(state.currentJobId).jobTitle : 'None'}</div>
+        <div class="mini">Job Spots: Corner Cafe, Parcel Point, Tech Hub</div>
       </div>
       <div class="action-card">
         <strong>GPS</strong>
@@ -2622,7 +2623,8 @@ function updateInteractionTarget() {
     }
     const interactionPoint = place.entryPoint || place.position;
     const distance = distanceXZ(reference, interactionPoint);
-    if (distance > place.radius) {
+    const interactionRadius = place.type === 'business' ? place.radius + 6 : place.radius;
+    if (distance > interactionRadius) {
       return;
     }
     if (place.type === 'dealer' && state.mode !== 'walking') {
@@ -2661,9 +2663,13 @@ function getInteractionHint() {
   }
   if (!state.interactionId) {
     const lookHint = state.pointerLocked ? 'Mouse look active.' : 'Click the game to lock the camera.';
+    const jobHint =
+      !state.currentJobId && state.mode === 'walking'
+        ? ' Jobs: Corner Cafe, Parcel Point, Tech Hub.'
+        : '';
     return state.mode === 'driving'
       ? `${lookHint} W/S drive, A/D steer, Shift brakes, Space exits.`
-      : `${lookHint} WASD moves, E interacts, Space enters car.`;
+      : `${lookHint} WASD moves, E interacts, Space enters car.${jobHint}`;
   }
   const place = placeById.get(state.interactionId);
   if (!place) {
@@ -2790,6 +2796,7 @@ function renderHud() {
     : `
       <div class="leaderboard-row"><span>Wanted Level</span><strong>${state.wantedLevel}</strong></div>
       <div class="leaderboard-row"><span>Job</span><strong>${state.currentJobId ? placeById.get(state.currentJobId).jobTitle : 'None'}</strong></div>
+      <div class="leaderboard-row"><span>Job Places</span><strong>Cafe, Parcel, Tech Hub</strong></div>
       <div class="leaderboard-row"><span>Location</span><strong>${getDistrictName(reference)}</strong></div>
     `;
 
@@ -2830,10 +2837,11 @@ function renderHud() {
 }
 
 function renderUi() {
+  // Keep HUD live every frame for speed/FPS while avoiding panel re-renders that can swallow clicks.
+  renderHud();
   if (!state.uiDirty) {
     return;
   }
-  renderHud();
   if (state.backpackOpen) {
     renderBackpackPanel();
   }
@@ -3107,7 +3115,6 @@ function animate() {
   updateAvatarTransform();
   updateCamera(dt);
 
-  markUiDirty();
   renderUi();
   renderer.render(scene, camera);
 }
