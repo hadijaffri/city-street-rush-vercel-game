@@ -10,16 +10,23 @@
     <div id="app">
       <canvas id="game"></canvas>
       <div class="hud" id="hud"></div>
+      <div class="minimap-wrap">
+        <canvas id="minimap" width="220" height="220"></canvas>
+      </div>
       <div class="panel panel-left" id="help-panel">
         <h1>City Street Rush</h1>
         <p>Drive, walk the sidewalks, take jobs, dodge the cops, and head to the racetrack when you want to race.</p>
         <div class="controls">
           <span><strong>Drive / Walk:</strong> WASD or Arrow Keys</span>
           <span><strong>Brake:</strong> Shift</span>
+          <span><strong>Nitro:</strong> F</span>
           <span><strong>Enter / Exit Car:</strong> Space</span>
           <span><strong>Interact:</strong> E</span>
           <span><strong>Backpack:</strong> B</span>
           <span><strong>Phone:</strong> P</span>
+          <span><strong>Missions:</strong> M</span>
+          <span><strong>Store:</strong> O</span>
+          <span><strong>Account:</strong> U</span>
           <span><strong>Racetrack:</strong> T</span>
           <span><strong>New Race:</strong> N at the track</span>
           <span><strong>Reset Car:</strong> R</span>
@@ -27,6 +34,9 @@
       </div>
       <div class="action-bar" id="action-bar">
         <button data-action="phone">Phone</button>
+        <button data-action="missions">Missions</button>
+        <button data-action="store">Store</button>
+        <button data-action="account">Account</button>
         <button data-action="settings">Settings</button>
         <button data-action="track">Track</button>
         <button data-action="interact">Interact</button>
@@ -41,9 +51,13 @@
         <button data-key="forward" aria-label="Move forward">Forward</button>
         <button data-key="right" aria-label="Steer right">Right</button>
         <button data-key="brake" aria-label="Brake">Brake</button>
+        <button data-key="boost" aria-label="Use nitro">Nitro</button>
         <button data-action="space" aria-label="Enter or exit car">Car</button>
         <button data-action="interact" aria-label="Interact">Use</button>
         <button data-action="phone" aria-label="Open phone">Phone</button>
+        <button data-action="missions" aria-label="Open missions">Missions</button>
+        <button data-action="store" aria-label="Open store">Store</button>
+        <button data-action="account" aria-label="Open account">Account</button>
         <button data-action="settings" aria-label="Open settings">Settings</button>
         <button data-action="track" aria-label="Go to track">Track</button>
         <button data-action="backpack" aria-label="Open backpack">Bag</button>

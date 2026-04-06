@@ -50,11 +50,23 @@ const centerPanelEl = document.getElementById('shop-panel');
 const toastEl = document.getElementById('toast');
 const touchControlsEl = document.getElementById('touch-controls');
 const actionBarEl = document.getElementById('action-bar');
+const minimapCanvas = document.getElementById('minimap');
+const minimapCtx = minimapCanvas ? minimapCanvas.getContext('2d') : null;
 
 const savedDeviceMode = window.localStorage.getItem('csr_device_mode');
 const savedLookSensitivity = Number(window.localStorage.getItem('csr_look_sens') || '1');
 const savedSteerSensitivity = Number(window.localStorage.getItem('csr_steer_sens') || '1.25');
 const savedInvertLookY = window.localStorage.getItem('csr_invert_y') === '1';
+
+const ACCOUNTS_STORAGE_KEY = 'csr_accounts_v1';
+const ACTIVE_ACCOUNT_STORAGE_KEY = 'csr_active_account_v1';
+const SAVE_VERSION = 3;
+const AUTOSAVE_INTERVAL = 12;
+const stripeLinks = {
+  creditsSmall: import.meta.env.VITE_STRIPE_CREDITS_SMALL || '',
+  creditsLarge: import.meta.env.VITE_STRIPE_CREDITS_LARGE || '',
+  vipPass: import.meta.env.VITE_STRIPE_VIP_PASS || '',
+};
 
 const CHUNK_SIZE = 240;
 const CHUNK_RANGE = 2;
@@ -199,6 +211,41 @@ const pickupCatalog = [
   { name: 'Spare Parts', value: 36, color: 0x4cc9f0 },
 ];
 
+const missionCatalog = [
+  {
+    id: 'deliver-parcels',
+    title: 'Courier Rush',
+    description: 'Collect 3 cargo crates and deliver them to Parcel Point.',
+    type: 'deliver',
+    reward: 210,
+    targetPlaceId: 'courier',
+    amount: 3,
+  },
+  {
+    id: 'speed-run',
+    title: 'Highway Sprint',
+    description: 'Hold 70 mph for 8 seconds without crashing.',
+    type: 'speed',
+    reward: 260,
+    speedTarget: 70,
+    duration: 8,
+  },
+  {
+    id: 'clean-driver',
+    title: 'Clean Driver',
+    description: 'Drive lawfully for 30 seconds with no wanted level.',
+    type: 'lawful',
+    reward: 180,
+    duration: 30,
+  },
+];
+
+const premiumStoreItems = [
+  { id: 'nitro-refill', name: 'Nitro Refill', cost: 95, description: 'Instantly refill nitro to 100%.' },
+  { id: 'elite-repair', name: 'Elite Repair Kit', cost: 130, description: 'Instantly restore condition to 100%.' },
+  { id: 'legal-shield', name: 'Legal Shield', cost: 180, description: 'Reduce wanted heat and restore lawful payout.' },
+];
+
 const pickupSpawns = [
   new THREE.Vector3(-30, 0, -90),
   new THREE.Vector3(30, 0, -90),
@@ -210,8 +257,29 @@ const pickupSpawns = [
   new THREE.Vector3(70, 0, 140),
 ];
 
+function safeReadJson(key, fallbackValue) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return fallbackValue;
+    }
+    const parsed = JSON.parse(raw);
+    return parsed ?? fallbackValue;
+  } catch {
+    return fallbackValue;
+  }
+}
+
+let accountBook = safeReadJson(ACCOUNTS_STORAGE_KEY, {});
+let activeAccountId = window.localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) || null;
+if (!accountBook || typeof accountBook !== 'object' || Array.isArray(accountBook)) {
+  accountBook = {};
+}
+
 const state = {
   mode: 'driving',
+  accountId: activeAccountId,
+  accountName: null,
   money: 180,
   gas: 100,
   gasMax: 100,
@@ -227,6 +295,12 @@ const state = {
   tankLevel: 0,
   handlingLevel: 0,
   armorLevel: 0,
+  tireGripLevel: 0,
+  suspensionLevel: 0,
+  turboLevel: 0,
+  nitroCharge: 100,
+  boostActive: false,
+  tireDamageTimer: 0,
   carModelId: 'starter',
   interactionId: null,
   centerPanel: null,
@@ -243,10 +317,22 @@ const state = {
   raceFinished: false,
   trackRaceActive: false,
   finishOrderCounter: 0,
+  activeMissionId: null,
+  missionProgress: 0,
+  missionsCompleted: 0,
+  missionMessage: 'No mission active.',
   lastCheckpointDistance: null,
   lastCheckpointWarningTime: -10,
   currentJobId: null,
   lastJobTimes: {},
+  dayTime: 10.5,
+  weather: 'clear',
+  weatherTimer: 45,
+  weatherGripFactor: 1,
+  trafficDensity: 1,
+  inInterior: false,
+  interiorPlaceId: null,
+  interiorReturnSnapshot: null,
   deviceMode: savedDeviceMode || null,
   lookSensitivity: clamp(Number.isFinite(savedLookSensitivity) ? savedLookSensitivity : 1, 0.4, 2.5),
   steeringSensitivity: clamp(Number.isFinite(savedSteerSensitivity) ? savedSteerSensitivity : 1, 0.6, 2),
@@ -259,7 +345,10 @@ const state = {
   cameraPitch: 0.38,
   pointerLocked: false,
   nextOfficerSpawnAt: 0,
+  nextRoadblockAt: 0,
+  nextSpikeStripAt: 0,
   lastConditionHitTime: -10,
+  autoSaveTimer: 0,
   fps: 60,
 };
 
@@ -269,6 +358,7 @@ const keys = {
   left: false,
   right: false,
   brake: false,
+  boost: false,
 };
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -283,6 +373,13 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x96cdf8);
 scene.fog = new THREE.Fog(0x96cdf8, 180, 420);
 
+const skyDayColor = new THREE.Color(0x96cdf8);
+const skyNightColor = new THREE.Color(0x06101b);
+const fogDayColor = new THREE.Color(0x96cdf8);
+const fogNightColor = new THREE.Color(0x0b1924);
+let hemisphereLight = null;
+let sunLight = null;
+
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 900);
 camera.position.set(-30, 16, -26);
 
@@ -294,6 +391,11 @@ const cityChunks = new Map();
 const trafficLights = [];
 const pickups = [];
 const worldColliders = [];
+const trafficVehicles = [];
+const pedestrians = [];
+const roadblocks = [];
+const spikeStrips = [];
+const interiors = new Map();
 
 function getChunkIndex(value) {
   return Math.floor((value + CHUNK_SIZE / 2) / CHUNK_SIZE);
@@ -369,6 +471,11 @@ function isPaved(x, z) {
   if (isOnRaceTrack(x, z)) {
     return true;
   }
+  for (const interior of interiors.values()) {
+    if (Math.abs(x - interior.center.x) <= 18 && Math.abs(z - interior.center.z) <= 13) {
+      return true;
+    }
+  }
   if (places.some((place) => place.type !== 'track' && isInLot(x, z, place))) {
     return true;
   }
@@ -403,6 +510,7 @@ function addBoxCollider(minX, maxX, minZ, maxZ, options = {}) {
     maxZ,
     chunkKey: options.chunkKey || null,
     damage: options.damage || 0,
+    tag: options.tag || null,
   });
 }
 
@@ -415,6 +523,14 @@ function removeCollidersForChunk(chunkKey) {
   for (let index = trafficLights.length - 1; index >= 0; index -= 1) {
     if (trafficLights[index].chunkKey === chunkKey) {
       trafficLights.splice(index, 1);
+    }
+  }
+}
+
+function removeCollidersByTag(tag) {
+  for (let index = worldColliders.length - 1; index >= 0; index -= 1) {
+    if (worldColliders[index].tag === tag) {
+      worldColliders.splice(index, 1);
     }
   }
 }
@@ -621,6 +737,75 @@ const trackBots = [
   }),
 ];
 
+const cityTrafficRoute = [
+  new THREE.Vector3(-150, 0, -70),
+  new THREE.Vector3(150, 0, -70),
+  new THREE.Vector3(150, 0, 70),
+  new THREE.Vector3(-150, 0, 70),
+];
+
+const cityPedRoute = [
+  new THREE.Vector3(-105, 0, -105),
+  new THREE.Vector3(105, 0, -105),
+  new THREE.Vector3(105, 0, 105),
+  new THREE.Vector3(-105, 0, 105),
+];
+
+function createTrafficVehicle(index) {
+  const start = cityTrafficRoute[index % cityTrafficRoute.length];
+  const next = cityTrafficRoute[(index + 1) % cityTrafficRoute.length];
+  const vehicle = createVehicle({
+    name: `Traffic ${index + 1}`,
+    color: [0xe63946, 0x457b9d, 0x2a9d8f, 0xf4a261, 0x6d597a][index % 5],
+    position: start.clone().add(new THREE.Vector3((index % 2 === 0 ? -1 : 1) * 9, 0, 0)),
+    heading: headingFromPoints(start, next),
+    maxSpeed: 17 + (index % 3) * 2,
+    acceleration: 14,
+    turnRate: 2.1,
+  });
+  vehicle.patrolRoute = cityTrafficRoute;
+  vehicle.routeIndex = (index + 1) % cityTrafficRoute.length;
+  vehicle.mesh.group.visible = true;
+  vehicle.isTraffic = true;
+  return vehicle;
+}
+
+function createPedestrian(index) {
+  const group = new THREE.Group();
+  const torso = new THREE.Mesh(
+    new THREE.BoxGeometry(0.7, 1.2, 0.45),
+    new THREE.MeshStandardMaterial({ color: [0x3a86ff, 0xff006e, 0x8338ec, 0xfb5607][index % 4], roughness: 0.85 }),
+  );
+  torso.position.y = 1.45;
+  const head = new THREE.Mesh(
+    new THREE.SphereGeometry(0.24, 12, 12),
+    new THREE.MeshStandardMaterial({ color: 0xf1c27d, roughness: 0.85 }),
+  );
+  head.position.y = 2.25;
+  const leftLeg = new THREE.Mesh(
+    new THREE.BoxGeometry(0.16, 0.9, 0.16),
+    new THREE.MeshStandardMaterial({ color: 0x1f2937, roughness: 0.9 }),
+  );
+  const rightLeg = leftLeg.clone();
+  leftLeg.position.set(-0.12, 0.65, 0);
+  rightLeg.position.set(0.12, 0.65, 0);
+  group.add(torso, head, leftLeg, rightLeg);
+  addShadow(group);
+  scene.add(group);
+  const routeIndex = index % cityPedRoute.length;
+  return {
+    group,
+    route: cityPedRoute,
+    routeIndex: (routeIndex + 1) % cityPedRoute.length,
+    position: cityPedRoute[routeIndex].clone(),
+    heading: 0,
+    speed: 2.1 + (index % 3) * 0.3,
+    leftLeg,
+    rightLeg,
+    active: true,
+  };
+}
+
 const avatar = createAvatar();
 avatar.group.visible = false;
 
@@ -666,6 +851,12 @@ const gpsArrows = Array.from({ length: 6 }, () => {
 });
 
 const officers = Array.from({ length: 5 }, () => createOfficerMesh());
+for (let index = 0; index < 8; index += 1) {
+  trafficVehicles.push(createTrafficVehicle(index));
+}
+for (let index = 0; index < 12; index += 1) {
+  pedestrians.push(createPedestrian(index));
+}
 
 const stoplightPhases = [
   { duration: 10, ns: 'green', ew: 'red', label: 'North/South Green' },
@@ -1390,6 +1581,69 @@ function createSpecialPlace(place) {
   place.group = group;
 }
 
+function createInteriors() {
+  const interiorPlaces = places.filter(
+    (place) => place.type !== 'track' && place.type !== 'jail',
+  );
+  const baseX = 1460;
+  const baseZ = -1480;
+  interiorPlaces.forEach((place, index) => {
+    const roomX = baseX + (index % 3) * 120;
+    const roomZ = baseZ + Math.floor(index / 3) * 130;
+    const floorY = terrainHeightAt(roomX, roomZ);
+    const group = new THREE.Group();
+
+    const floor = new THREE.Mesh(
+      new THREE.BoxGeometry(34, 0.3, 24),
+      new THREE.MeshStandardMaterial({ color: 0xdfe4ea, roughness: 0.9 }),
+    );
+    floor.position.set(roomX, floorY + 0.12, roomZ);
+    group.add(floor);
+
+    const wallMaterial = new THREE.MeshStandardMaterial({ color: 0xadb5bd, roughness: 0.82 });
+    const walls = [
+      { x: roomX, z: roomZ - 11.8, w: 34, h: 6, d: 0.5 },
+      { x: roomX, z: roomZ + 11.8, w: 34, h: 6, d: 0.5 },
+      { x: roomX - 16.8, z: roomZ, w: 0.5, h: 6, d: 24 },
+      { x: roomX + 16.8, z: roomZ, w: 0.5, h: 6, d: 24 },
+    ];
+    walls.forEach((wall) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(wall.w, wall.h, wall.d), wallMaterial);
+      mesh.position.set(wall.x, floorY + wall.h / 2, wall.z);
+      group.add(mesh);
+    });
+
+    const counter = new THREE.Mesh(
+      new THREE.BoxGeometry(10, 1.6, 1.8),
+      new THREE.MeshStandardMaterial({ color: place.accent, roughness: 0.6, metalness: 0.08 }),
+    );
+    counter.position.set(roomX, floorY + 0.95, roomZ - 6);
+    group.add(counter);
+
+    const sign = new THREE.Mesh(
+      new THREE.BoxGeometry(10, 1.1, 0.25),
+      new THREE.MeshStandardMaterial({ color: place.accent, emissive: place.accent, emissiveIntensity: 0.25 }),
+    );
+    sign.position.set(roomX, floorY + 4.5, roomZ - 10.6);
+    group.add(sign);
+
+    const roomTag = `interior-${place.id}`;
+    addBoxCollider(roomX - 17.2, roomX + 17.2, roomZ - 12.4, roomZ - 11.2, { damage: 2, tag: roomTag });
+    addBoxCollider(roomX - 17.2, roomX + 17.2, roomZ + 11.2, roomZ + 12.4, { damage: 2, tag: roomTag });
+    addBoxCollider(roomX - 17.4, roomX - 16.2, roomZ - 12.2, roomZ + 12.2, { damage: 2, tag: roomTag });
+    addBoxCollider(roomX + 16.2, roomX + 17.4, roomZ - 12.2, roomZ + 12.2, { damage: 2, tag: roomTag });
+
+    addShadow(group);
+    scene.add(group);
+    interiors.set(place.id, {
+      group,
+      center: new THREE.Vector3(roomX, 0, roomZ),
+      spawn: new THREE.Vector3(roomX, 0, roomZ + 8),
+      tag: roomTag,
+    });
+  });
+}
+
 function createPickups() {
   pickupSpawns.forEach((spawn, index) => {
     const type = pickupCatalog[index % pickupCatalog.length];
@@ -1435,9 +1689,17 @@ function getCarProfile() {
 function applyPlayerCarTuning() {
   const profile = getCarProfile();
   const conditionFactor = lerp(0.45, 1, state.carCondition / 100);
-  player.maxSpeed = (52 + profile.maxSpeedBonus + state.engineLevel * 7) * conditionFactor;
-  player.acceleration = 32 + profile.accelBonus + state.engineLevel * 5;
-  player.turnRate = (1.86 + state.handlingLevel * 0.24) * state.steeringSensitivity;
+  const tireDamageFactor = state.tireDamageTimer > 0 ? 0.72 : 1;
+  const weatherGrip = state.weatherGripFactor || 1;
+  player.maxSpeed =
+    (52 + profile.maxSpeedBonus + state.engineLevel * 7 + state.turboLevel * 3) *
+    conditionFactor *
+    tireDamageFactor;
+  player.acceleration = (32 + profile.accelBonus + state.engineLevel * 5 + state.turboLevel * 3) * weatherGrip;
+  player.turnRate =
+    (1.86 + state.handlingLevel * 0.24 + state.tireGripLevel * 0.12 + state.suspensionLevel * 0.08) *
+    weatherGrip *
+    state.steeringSensitivity;
   player.mesh.bodyMaterial.color.setHex(profile.color);
 }
 
@@ -1445,6 +1707,278 @@ function persistSettings() {
   window.localStorage.setItem('csr_look_sens', String(state.lookSensitivity));
   window.localStorage.setItem('csr_steer_sens', String(state.steeringSensitivity));
   window.localStorage.setItem('csr_invert_y', state.invertLookY ? '1' : '0');
+}
+
+function persistAccounts() {
+  window.localStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(accountBook));
+}
+
+function getActiveAccount() {
+  if (!state.accountId) {
+    return null;
+  }
+  return accountBook[state.accountId] || null;
+}
+
+function captureSaveSnapshot() {
+  return {
+    version: SAVE_VERSION,
+    savedAt: Date.now(),
+    state: {
+      money: state.money,
+      gas: state.gas,
+      gasMax: state.gasMax,
+      backpack: state.backpack,
+      backpackCapacity: state.backpackCapacity,
+      lawfulPayout: state.lawfulPayout,
+      carCondition: state.carCondition,
+      engineLevel: state.engineLevel,
+      tankLevel: state.tankLevel,
+      handlingLevel: state.handlingLevel,
+      armorLevel: state.armorLevel,
+      tireGripLevel: state.tireGripLevel,
+      suspensionLevel: state.suspensionLevel,
+      turboLevel: state.turboLevel,
+      nitroCharge: state.nitroCharge,
+      carModelId: state.carModelId,
+      currentJobId: state.currentJobId,
+      lastJobTimes: state.lastJobTimes,
+      gpsTargetId: state.gpsTargetId,
+      wantedHeat: state.wantedHeat,
+      wantedLevel: state.wantedLevel,
+      wantedTimer: state.wantedTimer,
+      wantedStartTime: state.wantedStartTime,
+      missionProgress: state.missionProgress,
+      activeMissionId: state.activeMissionId,
+      missionsCompleted: state.missionsCompleted,
+      weather: state.weather,
+      dayTime: state.dayTime,
+    },
+    player: {
+      position: { x: player.position.x, z: player.position.z },
+      heading: player.heading,
+      speed: player.speed,
+    },
+    avatar: {
+      position: { x: avatar.position.x, z: avatar.position.z },
+      heading: avatar.heading,
+      mode: state.mode,
+    },
+  };
+}
+
+function applySaveSnapshot(snapshot) {
+  if (!snapshot || !snapshot.state) {
+    return;
+  }
+  const safeState = snapshot.state;
+  state.money = safeState.money ?? state.money;
+  state.gasMax = clamp(safeState.gasMax ?? state.gasMax, 80, 220);
+  state.gas = clamp(safeState.gas ?? state.gas, 0, state.gasMax);
+  state.backpack = Array.isArray(safeState.backpack) ? safeState.backpack.slice(0, 32) : [];
+  state.backpackCapacity = clamp(safeState.backpackCapacity ?? state.backpackCapacity, 4, 26);
+  state.lawfulPayout = clamp(safeState.lawfulPayout ?? 100, 0, 100);
+  state.carCondition = clamp(safeState.carCondition ?? 100, 1, 100);
+  state.engineLevel = clamp(safeState.engineLevel ?? 0, 0, 3);
+  state.tankLevel = clamp(safeState.tankLevel ?? 0, 0, 3);
+  state.handlingLevel = clamp(safeState.handlingLevel ?? 0, 0, 3);
+  state.armorLevel = clamp(safeState.armorLevel ?? 0, 0, 3);
+  state.tireGripLevel = clamp(safeState.tireGripLevel ?? 0, 0, 3);
+  state.suspensionLevel = clamp(safeState.suspensionLevel ?? 0, 0, 3);
+  state.turboLevel = clamp(safeState.turboLevel ?? 0, 0, 3);
+  state.nitroCharge = clamp(safeState.nitroCharge ?? 100, 0, 100);
+  state.carModelId = safeState.carModelId || 'starter';
+  state.currentJobId = safeState.currentJobId || null;
+  state.lastJobTimes = safeState.lastJobTimes || {};
+  state.gpsTargetId = safeState.gpsTargetId || null;
+  state.wantedHeat = clamp(safeState.wantedHeat ?? 0, 0, 5);
+  state.wantedLevel = clamp(safeState.wantedLevel ?? 0, 0, 5);
+  state.wantedTimer = clamp(safeState.wantedTimer ?? 0, 0, 120);
+  state.wantedStartTime = Number.isFinite(safeState.wantedStartTime) ? safeState.wantedStartTime : -999;
+  state.activeMissionId = safeState.activeMissionId || null;
+  state.missionProgress = clamp(safeState.missionProgress ?? 0, 0, 999);
+  state.missionsCompleted = Math.max(0, safeState.missionsCompleted || 0);
+  state.weather = ['clear', 'rain', 'fog'].includes(safeState.weather) ? safeState.weather : 'clear';
+  state.dayTime = clamp(safeState.dayTime ?? 10.5, 0, 24);
+  state.trackRaceActive = false;
+  state.raceFinished = false;
+  state.finishOrderCounter = 0;
+
+  if (snapshot.player?.position) {
+    player.position.set(snapshot.player.position.x || CITY_SPAWN.x, 0, snapshot.player.position.z || CITY_SPAWN.z);
+    player.heading = snapshot.player.heading || 0;
+    player.speed = snapshot.player.speed || 0;
+  }
+  if (snapshot.avatar?.position) {
+    avatar.position.set(snapshot.avatar.position.x || CITY_SPAWN.x, 0, snapshot.avatar.position.z || CITY_SPAWN.z);
+    avatar.heading = snapshot.avatar.heading || 0;
+  }
+  state.mode = snapshot.avatar?.mode === 'walking' ? 'walking' : 'driving';
+  avatar.group.visible = state.mode === 'walking';
+  state.inInterior = false;
+  state.interiorPlaceId = null;
+  state.interiorReturnSnapshot = null;
+  applyPlayerCarTuning();
+  markUiDirty();
+}
+
+function saveToActiveAccount(showToastOnSave = false) {
+  const account = getActiveAccount();
+  if (!account) {
+    return false;
+  }
+  account.save = captureSaveSnapshot();
+  account.lastSavedAt = Date.now();
+  persistAccounts();
+  if (showToastOnSave) {
+    showToast(`Game saved for ${account.name}.`);
+  }
+  return true;
+}
+
+function useActiveAccount(accountId) {
+  const account = accountBook[accountId];
+  if (!account) {
+    return false;
+  }
+  state.accountId = accountId;
+  state.accountName = account.name;
+  activeAccountId = accountId;
+  window.localStorage.setItem(ACTIVE_ACCOUNT_STORAGE_KEY, accountId);
+  if (account.save) {
+    applySaveSnapshot(account.save);
+  } else {
+    saveToActiveAccount(false);
+  }
+  return true;
+}
+
+function registerAccountFlow() {
+  const rawName = window.prompt('Create account name:');
+  if (!rawName) {
+    return;
+  }
+  const name = rawName.trim();
+  if (!name) {
+    showToast('Account name cannot be empty.', 'bad');
+    return;
+  }
+  const accountId = name.toLowerCase().replace(/\s+/g, '-');
+  if (accountBook[accountId]) {
+    showToast('That account name already exists. Please log in instead.', 'bad');
+    return;
+  }
+  const password = window.prompt('Create password:');
+  if (!password || password.length < 3) {
+    showToast('Password must be at least 3 characters.', 'bad');
+    return;
+  }
+  accountBook[accountId] = {
+    id: accountId,
+    name,
+    password,
+    createdAt: Date.now(),
+    lastSavedAt: Date.now(),
+    save: captureSaveSnapshot(),
+  };
+  persistAccounts();
+  useActiveAccount(accountId);
+  showToast(`Account ${name} created and signed in.`);
+}
+
+function loginAccountFlow() {
+  const rawName = window.prompt('Account name:');
+  if (!rawName) {
+    return;
+  }
+  const accountId = rawName.trim().toLowerCase().replace(/\s+/g, '-');
+  const account = accountBook[accountId];
+  if (!account) {
+    showToast('Account not found.', 'bad');
+    return;
+  }
+  const password = window.prompt('Password:');
+  if (password !== account.password) {
+    showToast('Incorrect password.', 'bad');
+    return;
+  }
+  useActiveAccount(accountId);
+  showToast(`Logged in as ${account.name}.`);
+}
+
+function logoutAccount() {
+  saveToActiveAccount(false);
+  state.accountId = null;
+  state.accountName = null;
+  activeAccountId = null;
+  window.localStorage.removeItem(ACTIVE_ACCOUNT_STORAGE_KEY);
+  showToast('Logged out.');
+  markUiDirty();
+}
+
+function deleteActiveAccount() {
+  const account = getActiveAccount();
+  if (!account) {
+    showToast('No account is signed in.', 'bad');
+    return;
+  }
+  const shouldDelete = window.confirm(`Delete account ${account.name}? This will erase its save.`);
+  if (!shouldDelete) {
+    return;
+  }
+  delete accountBook[account.id];
+  persistAccounts();
+  logoutAccount();
+  showToast('Account deleted.');
+}
+
+function loadInitialAccountState() {
+  if (!activeAccountId || !accountBook[activeAccountId]) {
+    state.accountId = null;
+    state.accountName = null;
+    if (activeAccountId && !accountBook[activeAccountId]) {
+      activeAccountId = null;
+      window.localStorage.removeItem(ACTIVE_ACCOUNT_STORAGE_KEY);
+    }
+    return;
+  }
+  useActiveAccount(activeAccountId);
+}
+
+function openStripeCheckout(linkKey) {
+  const url = stripeLinks[linkKey];
+  if (!url) {
+    showToast(`Stripe link "${linkKey}" not configured. Add it in Vercel env vars.`, 'bad');
+    return;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function getMissionById(missionId) {
+  return missionCatalog.find((mission) => mission.id === missionId) || null;
+}
+
+function startMission(missionId) {
+  const mission = getMissionById(missionId);
+  if (!mission) {
+    return;
+  }
+  state.activeMissionId = mission.id;
+  state.missionProgress = 0;
+  state.missionMessage = mission.description;
+  showToast(`Mission started: ${mission.title}.`);
+  markUiDirty();
+}
+
+function abandonMission() {
+  if (!state.activeMissionId) {
+    return;
+  }
+  state.activeMissionId = null;
+  state.missionProgress = 0;
+  state.missionMessage = 'No mission active.';
+  showToast('Mission abandoned.', 'bad');
+  markUiDirty();
 }
 
 function applyDeviceMode(mode, announce = true) {
@@ -1725,7 +2259,84 @@ function handleModsShopAction(action) {
       },
       () => `Body armor level ${state.armorLevel} installed.`,
     );
+    return;
   }
+
+  if (action === 'grip') {
+    if (state.tireGripLevel >= 3) {
+      showToast('Tire grip is already maxed out.', 'bad');
+      return;
+    }
+    const cost = 85 + state.tireGripLevel * 50;
+    buyUpgrade(
+      cost,
+      () => {
+        state.tireGripLevel += 1;
+        applyPlayerCarTuning();
+      },
+      () => `Tire grip level ${state.tireGripLevel} installed.`,
+    );
+    return;
+  }
+
+  if (action === 'suspension') {
+    if (state.suspensionLevel >= 3) {
+      showToast('Suspension kit is already maxed out.', 'bad');
+      return;
+    }
+    const cost = 90 + state.suspensionLevel * 55;
+    buyUpgrade(
+      cost,
+      () => {
+        state.suspensionLevel += 1;
+        applyPlayerCarTuning();
+      },
+      () => `Suspension level ${state.suspensionLevel} installed.`,
+    );
+    return;
+  }
+
+  if (action === 'turbo') {
+    if (state.turboLevel >= 3) {
+      showToast('Turbo upgrade is already maxed out.', 'bad');
+      return;
+    }
+    const cost = 120 + state.turboLevel * 70;
+    buyUpgrade(
+      cost,
+      () => {
+        state.turboLevel += 1;
+        applyPlayerCarTuning();
+      },
+      () => `Turbo level ${state.turboLevel} installed.`,
+    );
+  }
+}
+
+function handlePremiumStoreAction(action) {
+  const item = premiumStoreItems.find((entry) => entry.id === action);
+  if (!item) {
+    return;
+  }
+  buyUpgrade(
+    item.cost,
+    () => {
+      if (item.id === 'nitro-refill') {
+        state.nitroCharge = 100;
+      }
+      if (item.id === 'elite-repair') {
+        state.carCondition = 100;
+        applyPlayerCarTuning();
+      }
+      if (item.id === 'legal-shield') {
+        state.wantedHeat = moveTowards(state.wantedHeat, 0, 3.6);
+        state.wantedLevel = Math.max(0, Math.ceil(state.wantedHeat - 0.05));
+        state.wantedTimer = Math.max(0, state.wantedTimer - 12);
+        state.lawfulPayout = 100;
+      }
+    },
+    `${item.name} purchased.`,
+  );
 }
 
 function getJobCooldown(placeId) {
@@ -1753,6 +2364,70 @@ function workShift(place) {
   state.money += place.pay;
   showToast(`Shift complete. ${place.name} paid you ${formatMoney(place.pay)}.`);
   markUiDirty();
+}
+
+function completeMission(mission) {
+  state.money += mission.reward;
+  state.missionsCompleted += 1;
+  state.activeMissionId = null;
+  state.missionProgress = 0;
+  state.missionMessage = `${mission.title} complete. Reward ${formatMoney(mission.reward)}.`;
+  showToast(state.missionMessage);
+  markUiDirty();
+}
+
+function updateMission(dt) {
+  const mission = getMissionById(state.activeMissionId);
+  if (!mission) {
+    return;
+  }
+  if (mission.type === 'deliver') {
+    const targetPlace = placeById.get(mission.targetPlaceId);
+    const collected = Math.min(state.backpack.length, mission.amount);
+    state.missionProgress = collected;
+    if (
+      targetPlace &&
+      collected >= mission.amount &&
+      distanceXZ(state.mode === 'driving' ? player.position : avatar.position, targetPlace.entryPoint || targetPlace.position) <
+        targetPlace.radius + 8
+    ) {
+      state.backpack.splice(0, mission.amount);
+      completeMission(mission);
+    }
+    return;
+  }
+
+  if (mission.type === 'speed') {
+    const mph = Math.round(Math.abs(player.speed) * 2);
+    if (state.mode === 'driving' && mph >= mission.speedTarget && state.carCondition > 5) {
+      state.missionProgress += dt;
+    } else {
+      state.missionProgress = moveTowards(state.missionProgress, 0, dt * 0.9);
+    }
+    if (state.missionProgress >= mission.duration) {
+      completeMission(mission);
+    }
+    return;
+  }
+
+  if (mission.type === 'lawful') {
+    if (
+      state.mode === 'driving' &&
+      state.wantedLevel === 0 &&
+      state.lawfulPayout >= 95 &&
+      isPaved(player.position.x, player.position.z)
+    ) {
+      state.missionProgress += dt;
+    } else {
+      state.missionProgress = moveTowards(state.missionProgress, 0, dt * 0.7);
+    }
+    if (state.missionProgress >= mission.duration) {
+      completeMission(mission);
+    }
+  }
+  if (state.phoneOpen || state.centerPanel === 'missions') {
+    markUiDirty();
+  }
 }
 
 function buyCarModel(carId) {
@@ -1804,6 +2479,10 @@ function renderPhonePanel() {
   const playerReference = state.mode === 'driving' ? player.position : avatar.position;
   const gpsDistance = targetPosition ? Math.round(distanceXZ(playerReference, targetPosition)) : 0;
   const carDistance = state.mode === 'walking' ? Math.round(distanceXZ(avatar.position, player.position)) : 0;
+  const hour = Math.floor(state.dayTime);
+  const minute = Math.floor((state.dayTime - hour) * 60);
+  const timeLabel = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  const mission = getMissionById(state.activeMissionId);
 
   phonePanelEl.innerHTML = `
     <h2>Phone</h2>
@@ -1826,6 +2505,8 @@ function renderPhonePanel() {
         <div class="mini">Wanted Level: ${state.wantedLevel}</div>
         <div class="mini">Job: ${state.currentJobId ? placeById.get(state.currentJobId).jobTitle : 'None'}</div>
         <div class="mini">Job Spots: Corner Cafe, Parcel Point, Tech Hub</div>
+        <div class="mini">Weather: ${state.weather[0].toUpperCase() + state.weather.slice(1)}</div>
+        <div class="mini">Time: ${timeLabel}</div>
       </div>
       <div class="action-card">
         <strong>GPS</strong>
@@ -1843,9 +2524,28 @@ function renderPhonePanel() {
           <button data-phone-action="gps-clear">Clear</button>
         </div>
       </div>
+      <div class="action-card">
+        <strong>Missions</strong>
+        <div class="mini">${mission ? mission.title : 'No mission active'}</div>
+        <div class="mini">${
+          mission
+            ? mission.type === 'deliver'
+              ? `${state.missionProgress}/${mission.amount}`
+              : `${Math.min(state.missionProgress, mission.duration).toFixed(1)} / ${mission.duration}s`
+            : 'Open missions to pick a contract'
+        }</div>
+      </div>
+      <div class="action-card">
+        <strong>Account</strong>
+        <div class="mini">${state.accountName ? `Signed in as ${state.accountName}` : 'Not signed in'}</div>
+        <div class="mini">Autosave every ${AUTOSAVE_INTERVAL}s</div>
+      </div>
       <div class="action-list">
         <button data-phone-action="teleport-track">Teleport To Racetrack</button>
         <button data-phone-action="teleport-home">Return To City</button>
+        <button data-phone-action="open-missions">Missions</button>
+        <button data-phone-action="open-store">Store</button>
+        <button data-phone-action="open-account">Account</button>
       </div>
     </div>
   `;
@@ -1889,14 +2589,98 @@ function renderCenterPanel() {
         <div class="action-card">
           <strong>Controls</strong>
           <div class="mini">Drive/Walk: WASD or Arrow Keys</div>
-          <div class="mini">Interact: E, Enter/Exit Car: Space</div>
-          <div class="mini">Phone: P, Backpack: B, Track: T</div>
+          <div class="mini">Interact: E, Enter/Exit Car: Space, Nitro: F</div>
+          <div class="mini">Phone: P, Missions: M, Store: O, Account: U</div>
+          <div class="mini">Backpack: B, Track: T, Reset: R</div>
         </div>
         <div class="action-list">
           <button data-center-action="device-mode" data-mode="desktop">Use Desktop Controls</button>
           <button data-center-action="device-mode" data-mode="mobile">Use Mobile Controls</button>
           <button data-center-action="device-mode" data-mode="auto">Use Auto Detect</button>
         </div>
+      </div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'missions') {
+    const missionCards = missionCatalog
+      .map((mission) => {
+        const active = state.activeMissionId === mission.id;
+        const progressLabel =
+          mission.type === 'deliver'
+            ? `${Math.min(state.missionProgress, mission.amount)}/${mission.amount}`
+            : `${Math.min(state.missionProgress, mission.duration).toFixed(1)} / ${mission.duration}s`;
+        return `
+          <div class="shop-item">
+            <div>
+              <strong>${mission.title}</strong>
+              <div class="mini">${mission.description}</div>
+              <div class="mini">Reward: ${formatMoney(mission.reward)}</div>
+              ${active ? `<div class="mini">Progress: ${progressLabel}</div>` : ''}
+            </div>
+            <button data-center-action="${active ? 'mission-abandon' : 'mission-start'}" data-mission="${mission.id}">
+              ${active ? 'Abandon' : 'Accept'}
+            </button>
+          </div>
+        `;
+      })
+      .join('');
+    centerPanelEl.innerHTML = `
+      <h2>Missions</h2>
+      <p class="mini">Take contracts to earn bigger payouts and level up your city rep.</p>
+      <div class="shop-list">${missionCards}</div>
+      <div class="mini">Missions completed: ${state.missionsCompleted}</div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'premium-store') {
+    const itemMarkup = premiumStoreItems
+      .map(
+        (item) => `
+          <div class="shop-item">
+            <div>
+              <strong>${item.name}</strong>
+              <div class="mini">${item.description}</div>
+            </div>
+            <button data-center-action="premium-buy" data-item="${item.id}">Buy ${formatMoney(item.cost)}</button>
+          </div>
+        `,
+      )
+      .join('');
+    centerPanelEl.innerHTML = `
+      <h2>City Street Store</h2>
+      <p class="mini">Use in-game cash or top up through Stripe checkout in a new tab.</p>
+      <div class="shop-list">${itemMarkup}</div>
+      <div class="action-list">
+        <button data-center-action="stripe-open" data-link="creditsSmall">Buy Credits (Small)</button>
+        <button data-center-action="stripe-open" data-link="creditsLarge">Buy Credits (Large)</button>
+        <button data-center-action="stripe-open" data-link="vipPass">Buy VIP Pass</button>
+      </div>
+      <div class="mini">Configure Stripe links with: VITE_STRIPE_CREDITS_SMALL, VITE_STRIPE_CREDITS_LARGE, VITE_STRIPE_VIP_PASS</div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'account') {
+    const account = getActiveAccount();
+    centerPanelEl.innerHTML = `
+      <h2>Account</h2>
+      <div class="action-card">
+        <strong>${account ? account.name : 'Guest Mode'}</strong>
+        <div class="mini">${
+          account
+            ? `Last saved: ${account.lastSavedAt ? new Date(account.lastSavedAt).toLocaleString() : 'Never'}`
+            : 'Sign in to sync saves on this device.'
+        }</div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="account-register">Create Account</button>
+        <button data-center-action="account-login">Login</button>
+        <button data-center-action="account-save" ${account ? '' : 'disabled'}>Save Now</button>
+        <button data-center-action="account-logout" ${account ? '' : 'disabled'}>Logout</button>
+        <button data-center-action="account-delete" ${account ? '' : 'disabled'}>Delete Account</button>
       </div>
     `;
     return;
@@ -1951,6 +2735,11 @@ function renderCenterPanel() {
           <button data-center-action="gas-sell-all" ${getSellAllValue() <= 0 ? 'disabled' : ''}>Sell ${formatMoney(getSellAllValue())}</button>
         </div>
       </div>
+      <div class="action-list">
+        <button data-center-action="${state.inInterior ? 'leave-interior' : 'enter-interior'}" data-place="${place.id}">
+          ${state.inInterior ? 'Leave Interior' : 'Enter Interior'}
+        </button>
+      </div>
     `;
     return;
   }
@@ -1968,6 +2757,9 @@ function renderCenterPanel() {
         </div>
         <button data-center-action="apply-job" data-place="${place.id}">${state.currentJobId === place.id ? 'Already Hired' : 'Apply For Job'}</button>
         <button data-center-action="work-job" data-place="${place.id}" ${state.currentJobId !== place.id || cooldown > 0 ? 'disabled' : ''}>Work Shift</button>
+        <button data-center-action="${state.inInterior ? 'leave-interior' : 'enter-interior'}" data-place="${place.id}">
+          ${state.inInterior ? 'Leave Interior' : 'Enter Interior'}
+        </button>
         <div class="mini">${cooldown > 0 ? `Next shift in ${Math.ceil(cooldown)}s.` : 'Shift ready now.'}</div>
       </div>
     `;
@@ -1994,6 +2786,23 @@ function renderCenterPanel() {
           <div><strong>Body Armor ${state.armorLevel}/3</strong><div class="mini">Take less damage when you crash.</div></div>
           <button data-center-action="mods-armor" ${state.armorLevel >= 3 ? 'disabled' : ''}>Buy ${formatMoney(armorCost)}</button>
         </div>
+        <div class="shop-item">
+          <div><strong>Tire Grip ${state.tireGripLevel}/3</strong><div class="mini">More traction for tight turns and rain.</div></div>
+          <button data-center-action="mods-grip" ${state.tireGripLevel >= 3 ? 'disabled' : ''}>Buy ${formatMoney(85 + state.tireGripLevel * 50)}</button>
+        </div>
+        <div class="shop-item">
+          <div><strong>Suspension ${state.suspensionLevel}/3</strong><div class="mini">Stability over bumps and sidewalks.</div></div>
+          <button data-center-action="mods-suspension" ${state.suspensionLevel >= 3 ? 'disabled' : ''}>Buy ${formatMoney(90 + state.suspensionLevel * 55)}</button>
+        </div>
+        <div class="shop-item">
+          <div><strong>Turbo ${state.turboLevel}/3</strong><div class="mini">Adds acceleration and top-speed headroom.</div></div>
+          <button data-center-action="mods-turbo" ${state.turboLevel >= 3 ? 'disabled' : ''}>Buy ${formatMoney(120 + state.turboLevel * 70)}</button>
+        </div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="${state.inInterior ? 'leave-interior' : 'enter-interior'}" data-place="${place.id}">
+          ${state.inInterior ? 'Leave Interior' : 'Enter Interior'}
+        </button>
       </div>
     `;
     return;
@@ -2020,6 +2829,11 @@ function renderCenterPanel() {
       <h2>${place.name}</h2>
       <p class="mini">You have to drive here physically, hop out, and buy cars in person.</p>
       <div class="shop-list">${carRows}</div>
+      <div class="action-list">
+        <button data-center-action="${state.inInterior ? 'leave-interior' : 'enter-interior'}" data-place="${place.id}">
+          ${state.inInterior ? 'Leave Interior' : 'Enter Interior'}
+        </button>
+      </div>
     `;
   }
 }
@@ -2070,6 +2884,9 @@ function toggleEnterExitCar() {
 }
 
 function teleportToTrack() {
+  if (state.inInterior) {
+    leaveInterior();
+  }
   state.mode = 'driving';
   avatar.group.visible = false;
   state.cameraYaw = 0;
@@ -2083,6 +2900,9 @@ function teleportToTrack() {
 }
 
 function teleportHome() {
+  if (state.inInterior) {
+    leaveInterior();
+  }
   state.mode = 'driving';
   avatar.group.visible = false;
   state.cameraYaw = 0.1;
@@ -2094,6 +2914,72 @@ function teleportHome() {
   state.raceFinished = false;
   closePanels();
   showToast('Returned to the city.');
+  markUiDirty();
+}
+
+function enterInterior(place) {
+  if (!place || place.type === 'track' || place.type === 'jail') {
+    return;
+  }
+  const interior = interiors.get(place.id);
+  if (!interior) {
+    showToast('Interior is not ready yet.', 'bad');
+    return;
+  }
+  if (state.mode === 'driving' && Math.abs(player.speed) > 1.4) {
+    showToast('Stop the car before entering.', 'bad');
+    return;
+  }
+
+  state.interiorReturnSnapshot = {
+    mode: state.mode,
+    player: {
+      position: player.position.clone(),
+      heading: player.heading,
+      speed: player.speed,
+    },
+    avatar: {
+      position: avatar.position.clone(),
+      heading: avatar.heading,
+    },
+    cameraYaw: state.cameraYaw,
+    cameraPitch: state.cameraPitch,
+  };
+
+  if (state.mode === 'driving') {
+    state.mode = 'walking';
+    avatar.group.visible = true;
+    player.speed = 0;
+  }
+  state.inInterior = true;
+  state.interiorPlaceId = place.id;
+  avatar.position.copy(interior.spawn.clone());
+  avatar.heading = Math.PI;
+  state.cameraYaw = Math.PI;
+  state.cameraPitch = 0.34;
+  openCenterPanel(place.id);
+  showToast(`Entered ${place.name} interior.`);
+}
+
+function leaveInterior() {
+  if (!state.inInterior || !state.interiorReturnSnapshot) {
+    return;
+  }
+  const snapshot = state.interiorReturnSnapshot;
+  player.position.copy(snapshot.player.position);
+  player.heading = snapshot.player.heading;
+  player.speed = 0;
+  avatar.position.copy(snapshot.avatar.position);
+  avatar.heading = snapshot.avatar.heading;
+  state.mode = snapshot.mode;
+  avatar.group.visible = state.mode === 'walking';
+  state.cameraYaw = snapshot.cameraYaw;
+  state.cameraPitch = snapshot.cameraPitch;
+  state.interiorReturnSnapshot = null;
+  state.interiorPlaceId = null;
+  state.inInterior = false;
+  closePanels();
+  showToast('Returned outside.');
   markUiDirty();
 }
 
@@ -2230,6 +3116,10 @@ function resetTrackRace() {
 }
 
 function performReset() {
+  if (state.inInterior) {
+    leaveInterior();
+    return;
+  }
   if (distanceXZ(player.position, TRACK_CENTER) < 180 || state.trackRaceActive) {
     resetTrackRace();
     showToast('Track positions reset.');
@@ -2273,9 +3163,14 @@ function arrestPlayer() {
   state.wantedLevel = 0;
   state.wantedTimer = 0;
   state.wantedStartTime = -999;
+  state.nextRoadblockAt = 0;
+  state.nextSpikeStripAt = 0;
   state.policeVehiclePursuit = false;
   state.arrestMeter = 0;
   state.nextOfficerSpawnAt = 0;
+  state.inInterior = false;
+  state.interiorPlaceId = null;
+  state.interiorReturnSnapshot = null;
   state.mode = 'walking';
   state.cameraYaw = Math.PI;
   state.cameraPitch = 0.34;
@@ -2289,6 +3184,13 @@ function arrestPlayer() {
   officers.forEach((officer) => {
     officer.active = false;
     officer.group.visible = false;
+  });
+  roadblocks.splice(0, roadblocks.length).forEach((roadblock) => {
+    scene.remove(roadblock.group);
+    removeCollidersByTag(roadblock.tag);
+  });
+  spikeStrips.splice(0, spikeStrips.length).forEach((strip) => {
+    scene.remove(strip.mesh);
   });
   openCenterPanel('jail-lock');
   showToast(`Police arrested you. Fine ${formatMoney(fine)}.`, 'bad');
@@ -2410,7 +3312,7 @@ function updateOfficer(officer, targetPosition, dt) {
 }
 
 function updatePolice(dt) {
-  if (state.wantedLevel <= 0 || state.jailTimer > 0) {
+  if (state.wantedLevel <= 0 || state.jailTimer > 0 || state.inInterior) {
     policeCar.mesh.group.visible = false;
     officers.forEach((officer) => {
       officer.active = false;
@@ -2506,6 +3408,8 @@ function updatePolice(dt) {
   if (state.arrestMeter > 2.1) {
     arrestPlayer();
   }
+
+  updatePoliceEscalation();
 }
 
 function updateTrackBot(bot, dt) {
@@ -2523,6 +3427,321 @@ function updateTrackBot(bot, dt) {
       registerFinish(bot);
     }
   });
+}
+
+function updateTrafficVehicle(vehicle, dt) {
+  if (state.trackRaceActive || state.inInterior || state.jailTimer > 0) {
+    vehicle.speed = moveTowards(vehicle.speed, 0, dt * 10);
+    return;
+  }
+
+  const route = vehicle.patrolRoute;
+  const target = route[vehicle.routeIndex];
+  const desiredHeading = headingFromPoints(vehicle.position, target);
+  vehicle.steerAngle = moveTowards(vehicle.steerAngle, normalizeAngle(desiredHeading - vehicle.heading), dt * 3);
+  vehicle.heading = moveAngleTowards(vehicle.heading, desiredHeading, vehicle.turnRate * dt);
+  const distToTarget = distanceXZ(vehicle.position, target);
+  let targetSpeed = vehicle.maxSpeed * state.trafficDensity;
+
+  const localX = toChunkLocal(vehicle.position.x);
+  const localZ = toChunkLocal(vehicle.position.z);
+  const insideIntersection =
+    Math.abs(localX) < CONTROLLED_INTERSECTION_HALF + 2 &&
+    Math.abs(localZ) < CONTROLLED_INTERSECTION_HALF + 2;
+  if (insideIntersection) {
+    const movingEastWest = Math.abs(Math.cos(vehicle.heading)) >= Math.abs(Math.sin(vehicle.heading));
+    const lightState = movingEastWest ? stoplightState.ew : stoplightState.ns;
+    if (lightState !== 'green') {
+      targetSpeed = Math.min(targetSpeed, 4);
+    }
+  }
+
+  const playerDistance = distanceXZ(vehicle.position, player.position);
+  if (playerDistance < 12) {
+    targetSpeed = Math.min(targetSpeed, Math.max(3, Math.abs(player.speed) * 0.65));
+  }
+
+  if (distToTarget < 10) {
+    targetSpeed = Math.min(targetSpeed, 8);
+  }
+  vehicle.speed = moveTowards(vehicle.speed, targetSpeed, (targetSpeed < vehicle.speed ? 26 : vehicle.acceleration) * dt);
+  const collided = moveBodyWithCollisions(
+    vehicle.position,
+    Math.cos(vehicle.heading) * vehicle.speed * dt,
+    Math.sin(vehicle.heading) * vehicle.speed * dt,
+    2.2,
+  );
+  if (collided) {
+    vehicle.speed *= 0.35;
+  }
+
+  if (distToTarget < 6) {
+    vehicle.routeIndex = (vehicle.routeIndex + 1) % route.length;
+  }
+}
+
+function updateTraffic(dt) {
+  const desiredVisible = Math.max(2, Math.round(trafficVehicles.length * state.trafficDensity));
+  trafficVehicles.forEach((vehicle, index) => {
+    const isVisible = index < desiredVisible;
+    vehicle.active = isVisible;
+    vehicle.mesh.group.visible = isVisible;
+    if (!isVisible) {
+      vehicle.speed = 0;
+      return;
+    }
+    updateTrafficVehicle(vehicle, dt);
+    if (distanceXZ(player.position, vehicle.position) < 3.6 && Math.abs(player.speed) > 12) {
+      applyPenalty(14, 'You collided with city traffic.', 1.1);
+      damageCar(12, 'Traffic collision caused major car damage.');
+      player.speed *= 0.48;
+    }
+  });
+}
+
+function updatePedestrians(dt) {
+  if (state.trackRaceActive || state.inInterior || state.jailTimer > 0) {
+    pedestrians.forEach((ped) => {
+      ped.group.visible = false;
+    });
+    return;
+  }
+  pedestrians.forEach((ped, index) => {
+    ped.group.visible = true;
+    const target = ped.route[ped.routeIndex];
+    const desiredHeading = headingFromPoints(ped.position, target);
+    ped.heading = moveAngleTowards(ped.heading, desiredHeading, dt * 3.2);
+    ped.position.x += Math.cos(ped.heading) * ped.speed * dt;
+    ped.position.z += Math.sin(ped.heading) * ped.speed * dt;
+    const stride = Math.sin(elapsedTime * (4.2 + index * 0.09)) * 0.45;
+    ped.leftLeg.rotation.x = stride;
+    ped.rightLeg.rotation.x = -stride;
+    ped.group.position.set(
+      ped.position.x,
+      terrainHeightAt(ped.position.x, ped.position.z) + 0.02,
+      ped.position.z,
+    );
+    ped.group.rotation.y = -ped.heading;
+    if (distanceXZ(ped.position, target) < 3.2) {
+      ped.routeIndex = (ped.routeIndex + 1) % ped.route.length;
+    }
+    if (state.mode === 'driving' && distanceXZ(ped.position, player.position) < 2.6 && Math.abs(player.speed) > 8) {
+      applyPenalty(25, 'Pedestrian incident reported. Severe penalty.', 1.8);
+      damageCar(15, 'You hit a pedestrian barrier zone.');
+      player.speed *= 0.3;
+      ped.routeIndex = (ped.routeIndex + 2) % ped.route.length;
+      ped.position.add(new THREE.Vector3((Math.random() - 0.5) * 8, 0, (Math.random() - 0.5) * 8));
+    }
+  });
+}
+
+function spawnRoadblockNearPlayer() {
+  const forward = new THREE.Vector3(Math.cos(player.heading), 0, Math.sin(player.heading));
+  const center = player.position.clone().addScaledVector(forward, 36 + Math.random() * 12);
+  const alongX = Math.abs(forward.x) > Math.abs(forward.z);
+  const tag = `roadblock-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+  const group = new THREE.Group();
+  for (let i = -1; i <= 1; i += 1) {
+    const block = new THREE.Mesh(
+      new THREE.BoxGeometry(alongX ? 2 : 6.5, 1.35, alongX ? 6.5 : 2),
+      new THREE.MeshStandardMaterial({ color: 0x495057, roughness: 0.82 }),
+    );
+    block.position.set(
+      center.x + (alongX ? 0 : i * 6.6),
+      terrainHeightAt(center.x, center.z) + 0.7,
+      center.z + (alongX ? i * 6.6 : 0),
+    );
+    group.add(block);
+    addBoxCollider(
+      block.position.x - (alongX ? 1.2 : 3.5),
+      block.position.x + (alongX ? 1.2 : 3.5),
+      block.position.z - (alongX ? 3.5 : 1.2),
+      block.position.z + (alongX ? 3.5 : 1.2),
+      { damage: 12, tag },
+    );
+  }
+  addShadow(group);
+  scene.add(group);
+  roadblocks.push({ group, tag, expiresAt: elapsedTime + 20 });
+  showToast('Police deployed a roadblock!', 'bad');
+}
+
+function spawnSpikeStripNearPlayer() {
+  const forward = new THREE.Vector3(Math.cos(player.heading), 0, Math.sin(player.heading));
+  const center = player.position.clone().addScaledVector(forward, 28 + Math.random() * 10);
+  const strip = new THREE.Mesh(
+    new THREE.BoxGeometry(8, 0.22, 1.2),
+    new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.6, metalness: 0.45 }),
+  );
+  strip.position.set(center.x, terrainHeightAt(center.x, center.z) + 0.12, center.z);
+  strip.rotation.y = -player.heading;
+  scene.add(strip);
+  spikeStrips.push({
+    mesh: strip,
+    center: center.clone(),
+    radius: 4.6,
+    expiresAt: elapsedTime + 16,
+    triggered: false,
+  });
+  showToast('Spike strip detected ahead!', 'bad');
+}
+
+function updateDynamicHazards() {
+  for (let index = roadblocks.length - 1; index >= 0; index -= 1) {
+    const roadblock = roadblocks[index];
+    if (elapsedTime >= roadblock.expiresAt || state.wantedLevel <= 0 || state.trackRaceActive || state.inInterior) {
+      scene.remove(roadblock.group);
+      removeCollidersByTag(roadblock.tag);
+      roadblocks.splice(index, 1);
+    }
+  }
+  for (let index = spikeStrips.length - 1; index >= 0; index -= 1) {
+    const strip = spikeStrips[index];
+    if (elapsedTime >= strip.expiresAt || state.wantedLevel <= 0 || state.trackRaceActive || state.inInterior) {
+      scene.remove(strip.mesh);
+      spikeStrips.splice(index, 1);
+      continue;
+    }
+    if (
+      !strip.triggered &&
+      state.mode === 'driving' &&
+      distanceXZ(player.position, strip.center) < strip.radius &&
+      Math.abs(player.speed) > 6
+    ) {
+      strip.triggered = true;
+      state.tireDamageTimer = 18;
+      state.nitroCharge = Math.max(0, state.nitroCharge - 20);
+      damageCar(10, 'Spike strip hit. Tires damaged.');
+      applyPenalty(12, 'Spike strip hit during pursuit.', 1);
+      player.speed *= 0.55;
+    }
+  }
+}
+
+function updatePoliceEscalation() {
+  if (state.wantedLevel <= 0 || state.trackRaceActive || state.inInterior) {
+    return;
+  }
+  if (state.wantedLevel >= 2 && elapsedTime >= state.nextRoadblockAt) {
+    spawnRoadblockNearPlayer();
+    state.nextRoadblockAt = elapsedTime + 24 - state.wantedLevel * 2;
+  }
+  if (state.wantedLevel >= 3 && elapsedTime >= state.nextSpikeStripAt) {
+    spawnSpikeStripNearPlayer();
+    state.nextSpikeStripAt = elapsedTime + 20 - state.wantedLevel * 1.6;
+  }
+}
+
+function updateWorldAtmosphere(dt) {
+  state.dayTime = (state.dayTime + dt * 0.18) % 24;
+  const daylight = clamp(Math.sin(((state.dayTime - 6) / 12) * Math.PI), 0, 1);
+  const weatherFogBoost = state.weather === 'fog' ? 0.55 : state.weather === 'rain' ? 0.25 : 0;
+
+  scene.background = skyNightColor.clone().lerp(skyDayColor, daylight);
+  scene.fog.color.copy(fogNightColor.clone().lerp(fogDayColor, daylight));
+  scene.fog.near = 120;
+  scene.fog.far = 420 - weatherFogBoost * 120;
+
+  if (hemisphereLight) {
+    hemisphereLight.intensity = 0.45 + daylight * 0.85;
+  }
+  if (sunLight) {
+    sunLight.intensity = 0.08 + daylight * 1.75;
+    sunLight.position.set(
+      70 * Math.cos((state.dayTime / 24) * Math.PI * 2),
+      40 + daylight * 95,
+      40 * Math.sin((state.dayTime / 24) * Math.PI * 2),
+    );
+  }
+
+  state.weatherTimer -= dt;
+  if (state.weatherTimer <= 0) {
+    const nextWeather = ['clear', 'rain', 'fog'][Math.floor(noise2D(elapsedTime, state.dayTime, 91) * 3)];
+    if (nextWeather !== state.weather) {
+      state.weather = nextWeather;
+      showToast(`Weather changed: ${nextWeather}.`);
+      markUiDirty();
+    }
+    state.weatherTimer = 45 + noise2D(state.dayTime, elapsedTime, 14) * 35;
+  }
+  state.weatherGripFactor = state.weather === 'rain' ? 0.82 : state.weather === 'fog' ? 0.92 : 1;
+  state.trafficDensity = clamp(
+    0.5 + daylight * 0.9 - (state.weather === 'rain' ? 0.16 : 0),
+    0.35,
+    1,
+  );
+}
+
+function renderMinimap() {
+  if (!minimapCtx || !minimapCanvas) {
+    return;
+  }
+  const width = minimapCanvas.width;
+  const height = minimapCanvas.height;
+  const cx = width / 2;
+  const cy = height / 2;
+  const reference = state.mode === 'driving' ? player.position : avatar.position;
+  const heading = state.mode === 'driving' ? player.heading : avatar.heading;
+  const scale = 0.32;
+
+  minimapCtx.clearRect(0, 0, width, height);
+  minimapCtx.fillStyle = 'rgba(6, 16, 24, 0.88)';
+  minimapCtx.fillRect(0, 0, width, height);
+
+  minimapCtx.strokeStyle = 'rgba(164, 188, 214, 0.25)';
+  minimapCtx.lineWidth = 1;
+  for (let gx = -2; gx <= 2; gx += 1) {
+    for (let gz = -2; gz <= 2; gz += 1) {
+      const originX = getChunkOrigin(getChunkIndex(reference.x) + gx);
+      const originZ = getChunkOrigin(getChunkIndex(reference.z) + gz);
+      ROAD_LINES.forEach((line) => {
+        const vx = cx + (originX + line - reference.x) * scale;
+        minimapCtx.beginPath();
+        minimapCtx.moveTo(vx, 0);
+        minimapCtx.lineTo(vx, height);
+        minimapCtx.stroke();
+
+        const hz = cy + (originZ + line - reference.z) * scale;
+        minimapCtx.beginPath();
+        minimapCtx.moveTo(0, hz);
+        minimapCtx.lineTo(width, hz);
+        minimapCtx.stroke();
+      });
+    }
+  }
+
+  const drawDot = (worldX, worldZ, color, size = 3.2) => {
+    minimapCtx.fillStyle = color;
+    minimapCtx.beginPath();
+    minimapCtx.arc(cx + (worldX - reference.x) * scale, cy + (worldZ - reference.z) * scale, size, 0, Math.PI * 2);
+    minimapCtx.fill();
+  };
+
+  places.forEach((place) => {
+    const markerColor = place.type === 'business' ? '#ffd166' : place.type === 'mods' ? '#72efdd' : '#f8f9fa';
+    drawDot(place.position.x, place.position.z, markerColor, place.type === 'track' ? 4 : 3);
+  });
+
+  if (state.gpsTargetId) {
+    const target = getTargetPosition();
+    if (target) {
+      drawDot(target.x, target.z, '#4cc9f0', 4.2);
+    }
+  }
+
+  trafficVehicles.forEach((traffic) => {
+    if (traffic.active) {
+      drawDot(traffic.position.x, traffic.position.z, '#ff8fab', 2.2);
+    }
+  });
+
+  drawDot(reference.x, reference.z, '#70e000', 4);
+  minimapCtx.strokeStyle = '#70e000';
+  minimapCtx.lineWidth = 2;
+  minimapCtx.beginPath();
+  minimapCtx.moveTo(cx, cy);
+  minimapCtx.lineTo(cx + Math.cos(heading) * 12, cy + Math.sin(heading) * 12);
+  minimapCtx.stroke();
 }
 
 function updateVehicleTransform(vehicle, dt = 1 / 60) {
@@ -2591,8 +3810,12 @@ function updateDriving(dt) {
   const onTrack = isOnRaceTrack(player.position.x, player.position.z);
   const forwardInput = locked ? 0 : Number(keys.forward) - Number(keys.back) * 0.7;
   const steerInput = locked ? 0 : Number(keys.right) - Number(keys.left);
+  const boostPressed = !locked && keys.boost && forwardInput > 0.3 && state.nitroCharge > 1;
 
   applyPlayerCarTuning();
+  if (state.tireDamageTimer > 0) {
+    state.tireDamageTimer = Math.max(0, state.tireDamageTimer - dt);
+  }
   player.steerAngle = moveTowards(
     player.steerAngle,
     steerInput * (0.72 * state.steeringSensitivity),
@@ -2603,14 +3826,27 @@ function updateDriving(dt) {
     state.cameraPitch = moveTowards(state.cameraPitch, 0.38, dt * 1.6);
   }
   if (Math.abs(player.speed) > 0.08) {
-    const steerStrength = clamp(Math.abs(player.speed) / 10, 0.18, 0.96);
+    const gripFactor =
+      (0.86 + state.tireGripLevel * 0.06 + state.suspensionLevel * 0.04) *
+      (state.weatherGripFactor || 1) *
+      (state.tireDamageTimer > 0 ? 0.74 : 1);
+    const steerStrength = clamp(Math.abs(player.speed) / 10, 0.18, 0.96) * gripFactor;
     player.heading += player.steerAngle * player.turnRate * dt * steerStrength * (player.speed >= 0 ? 1 : -1);
   }
 
   if (forwardInput !== 0 && state.gas > 0.01 && !locked) {
-    player.speed += forwardInput * player.acceleration * dt;
+    const turboPush = 1 + state.turboLevel * 0.08;
+    player.speed += forwardInput * player.acceleration * turboPush * dt;
   } else {
     player.speed = moveTowards(player.speed, 0, (onPaved ? 8 : 12) * dt);
+  }
+  state.boostActive = boostPressed;
+  if (boostPressed) {
+    const boostPower = 14 + state.turboLevel * 3.8;
+    player.speed += boostPower * dt;
+    state.nitroCharge = Math.max(0, state.nitroCharge - (18 + state.turboLevel * 2.6) * dt);
+  } else {
+    state.nitroCharge = Math.min(100, state.nitroCharge + (4.8 + state.turboLevel) * dt);
   }
   if (keys.brake) {
     player.speed = moveTowards(player.speed, 0, 26 * dt);
@@ -2619,7 +3855,8 @@ function updateDriving(dt) {
     player.speed = moveTowards(player.speed, 16, 22 * dt);
   }
 
-  player.speed = clamp(player.speed, -player.reverseSpeed, onPaved ? player.maxSpeed : 16);
+  const boostedMaxSpeed = onPaved ? player.maxSpeed + (state.boostActive ? 9 + state.turboLevel * 4 : 0) : 16;
+  player.speed = clamp(player.speed, -player.reverseSpeed, boostedMaxSpeed);
   const deltaX = Math.cos(player.heading) * player.speed * dt;
   const deltaZ = Math.sin(player.heading) * player.speed * dt;
   const collided = moveBodyWithCollisions(player.position, deltaX, deltaZ, 2.3);
@@ -2630,7 +3867,7 @@ function updateDriving(dt) {
 
   const gasDrain =
     (0.05 + Math.abs(player.speed) / Math.max(player.maxSpeed, 1) * 0.18 + Math.abs(forwardInput) * 0.28) *
-    (1 + state.engineLevel * 0.08);
+    (1 + state.engineLevel * 0.08 + state.turboLevel * 0.05 + (state.boostActive ? 0.22 : 0));
   state.gas = Math.max(0, state.gas - gasDrain * dt);
   if (state.gas <= 0.01 && !state.outOfGasToastShown) {
     state.outOfGasToastShown = true;
@@ -2749,6 +3986,13 @@ function updatePickups(dt) {
 }
 
 function updateInteractionTarget() {
+  if (state.inInterior && state.interiorPlaceId) {
+    if (state.interactionId !== state.interiorPlaceId) {
+      state.interactionId = state.interiorPlaceId;
+      markUiDirty();
+    }
+    return;
+  }
   const reference = state.mode === 'driving' ? player.position : avatar.position;
   let nextInteraction = null;
   let bestDistance = Infinity;
@@ -2789,10 +4033,16 @@ function updateInteractionTarget() {
     state.centerPanel !== 'jail-lock' &&
     state.centerPanel !== 'settings' &&
     state.centerPanel !== 'device-setup' &&
+    state.centerPanel !== 'missions' &&
+    state.centerPanel !== 'premium-store' &&
+    state.centerPanel !== 'account' &&
     placeById.has(state.centerPanel)
   ) {
     const panelPlace = placeById.get(state.centerPanel);
-    const panelPoint = panelPlace.entryPoint || panelPlace.position;
+    const panelPoint =
+      state.inInterior && interiors.get(panelPlace.id)
+        ? interiors.get(panelPlace.id).spawn
+        : panelPlace.entryPoint || panelPlace.position;
     if (distanceXZ(reference, panelPoint) > panelPlace.radius + 14) {
       state.centerPanel = null;
       centerPanelEl.classList.add('hidden');
@@ -2814,7 +4064,7 @@ function getInteractionHint() {
         ? ' Jobs: Corner Cafe, Parcel Point, Tech Hub.'
         : '';
     return state.mode === 'driving'
-      ? `${lookHint} W/S drive, A/D steer, Shift brakes, Space exits.`
+      ? `${lookHint} W/S drive, A/D steer, Shift brakes, F boosts, Space exits.`
       : `${lookHint} WASD moves, E interacts, Space enters car.${jobHint}`;
   }
   const place = placeById.get(state.interactionId);
@@ -2925,6 +4175,13 @@ function renderHud() {
   const speedDisplay = Math.round(Math.abs(player.speed) * 2);
   const gasPercent = (state.gas / state.gasMax) * 100;
   const conditionPercent = clamp(state.carCondition, 0, 100);
+  const nitroPercent = clamp(state.nitroCharge, 0, 100);
+  const activeMission = getMissionById(state.activeMissionId);
+  const activeMissionProgress = activeMission
+    ? activeMission.type === 'deliver'
+      ? `${Math.min(state.missionProgress, activeMission.amount)}/${activeMission.amount}`
+      : `${Math.min(state.missionProgress, activeMission.duration).toFixed(1)}s`
+    : 'None';
   const bonusPercent = state.trackRaceActive
     ? state.lawfulPayout
     : Math.min(100, (state.cityBonusTimer / CITY_BONUS_INTERVAL) * 100);
@@ -2971,11 +4228,18 @@ function renderHud() {
           <label><span>${state.trackRaceActive ? 'Lawful Lap Payout' : 'Lawful City Bonus'}</span><span>${formatMoney(state.lawfulPayout)}</span></label>
           <div class="bar"><div class="bar-fill law" style="width: ${bonusPercent}%"></div></div>
         </div>
+        <div class="meter">
+          <label><span>Nitro</span><span>${Math.round(state.nitroCharge)}%</span></label>
+          <div class="bar"><div class="bar-fill nitro" style="width: ${nitroPercent}%"></div></div>
+        </div>
       </div>
     </div>
     <div class="stat-card">
       <div class="stat-line"><span>${state.trackRaceActive ? 'Track' : 'City'}</span><strong>${state.trackRaceActive ? `${Math.min(player.laps + 1, TOTAL_LAPS)}/${TOTAL_LAPS}` : stoplightState.label}</strong></div>
       <div class="stat-line"><span>Cargo</span><strong>${state.backpack.length}/${state.backpackCapacity}</strong></div>
+      <div class="stat-line"><span>Mission</span><strong>${activeMission ? activeMission.title : 'None'}</strong></div>
+      <div class="stat-line"><span>Progress</span><strong>${activeMissionProgress}</strong></div>
+      <div class="stat-line"><span>Weather</span><strong>${state.weather}</strong></div>
       <div class="stat-line"><span>Hint</span><strong>${getInteractionHint()}</strong></div>
       <div class="leaderboard">${leaderboardMarkup}</div>
     </div>
@@ -3009,6 +4273,14 @@ function handleCenterPanelAction(action, dataset) {
     handleModsShopAction(action.replace('mods-', ''));
     return;
   }
+  if (action === 'premium-buy') {
+    handlePremiumStoreAction(dataset.item);
+    return;
+  }
+  if (action === 'stripe-open') {
+    openStripeCheckout(dataset.link);
+    return;
+  }
   if (action === 'apply-job') {
     applyForJob(placeById.get(dataset.place));
     return;
@@ -3027,6 +4299,47 @@ function handleCenterPanelAction(action, dataset) {
   }
   if (action === 'open-settings') {
     openCenterPanel('settings');
+    return;
+  }
+  if (action === 'mission-start') {
+    startMission(dataset.mission);
+    return;
+  }
+  if (action === 'mission-abandon') {
+    abandonMission();
+    return;
+  }
+  if (action === 'account-register') {
+    registerAccountFlow();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'account-login') {
+    loginAccountFlow();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'account-logout') {
+    logoutAccount();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'account-save') {
+    saveToActiveAccount(true);
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'account-delete') {
+    deleteActiveAccount();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'enter-interior') {
+    enterInterior(placeById.get(dataset.place));
+    return;
+  }
+  if (action === 'leave-interior') {
+    leaveInterior();
     return;
   }
   if (action === 'device-mode') {
@@ -3055,6 +4368,18 @@ function handlePhoneAction(action, dataset) {
   }
   if (action === 'teleport-home') {
     teleportHome();
+    return;
+  }
+  if (action === 'open-missions') {
+    openCenterPanel('missions');
+    return;
+  }
+  if (action === 'open-store') {
+    openCenterPanel('premium-store');
+    return;
+  }
+  if (action === 'open-account') {
+    openCenterPanel('account');
   }
 }
 
@@ -3063,6 +4388,12 @@ function handleAction(action) {
     togglePhone();
   } else if (action === 'settings') {
     openCenterPanel('settings');
+  } else if (action === 'missions') {
+    openCenterPanel('missions');
+  } else if (action === 'store') {
+    openCenterPanel('premium-store');
+  } else if (action === 'account') {
+    openCenterPanel('account');
   } else if (action === 'track') {
     teleportToTrack();
   } else if (action === 'interact') {
@@ -3087,6 +4418,7 @@ function setupInput() {
     d: 'right',
     ArrowRight: 'right',
     Shift: 'brake',
+    f: 'boost',
   };
 
   const normalizeKey = (key) => (key.length === 1 ? key.toLowerCase() : key);
@@ -3134,6 +4466,9 @@ function setupInput() {
     if (key === 'e') performInteraction();
     if (key === 'b') toggleBackpack();
     if (key === 'p') togglePhone();
+    if (key === 'm') openCenterPanel('missions');
+    if (key === 'o') openCenterPanel('premium-store');
+    if (key === 'u') openCenterPanel('account');
     if (key === 't') teleportToTrack();
     if (key === 'r') performReset();
     if (key === 'n') {
@@ -3247,26 +4582,28 @@ function setupInput() {
 }
 
 function setupLighting() {
-  const hemisphereLight = new THREE.HemisphereLight(0xe9f5ff, 0x2f5034, 1.15);
+  hemisphereLight = new THREE.HemisphereLight(0xe9f5ff, 0x2f5034, 1.15);
   scene.add(hemisphereLight);
 
-  const sun = new THREE.DirectionalLight(0xfff2d3, 1.6);
-  sun.position.set(70, 120, 40);
-  sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -220;
-  sun.shadow.camera.right = 220;
-  sun.shadow.camera.top = 220;
-  sun.shadow.camera.bottom = -220;
-  sun.shadow.camera.far = 340;
-  scene.add(sun);
+  sunLight = new THREE.DirectionalLight(0xfff2d3, 1.6);
+  sunLight.position.set(70, 120, 40);
+  sunLight.castShadow = true;
+  sunLight.shadow.mapSize.set(2048, 2048);
+  sunLight.shadow.camera.left = -220;
+  sunLight.shadow.camera.right = 220;
+  sunLight.shadow.camera.top = 220;
+  sunLight.shadow.camera.bottom = -220;
+  sunLight.shadow.camera.far = 340;
+  scene.add(sunLight);
 }
 
 function populateWorld() {
   places.forEach((place) => createSpecialPlace(place));
+  createInteriors();
   createPickups();
   ensureCityChunks(CITY_SPAWN);
   applyPlayerCarTuning();
+  loadInitialAccountState();
   state.cameraYaw = player.heading;
   state.cameraPitch = 0.38;
   updateVehicleTransform(player, 1 / 60);
@@ -3277,6 +4614,8 @@ function populateWorld() {
   applyDeviceMode(state.deviceMode, false);
   if (!state.deviceMode) {
     openCenterPanel('device-setup');
+  } else if (!state.accountId) {
+    openCenterPanel('account');
   }
 }
 
@@ -3293,8 +4632,10 @@ function animate() {
   state.fps = lerp(state.fps, instantFps, 0.12);
 
   ensureCityChunks(state.mode === 'driving' ? player.position : avatar.position);
+  updateWorldAtmosphere(dt);
   updateTrafficLights(dt);
   updateWanted(dt);
+  updateDynamicHazards();
 
   if (state.jailTimer > 0) {
     state.jailTimer = Math.max(0, state.jailTimer - dt);
@@ -3313,16 +4654,33 @@ function animate() {
     trackBots.forEach((bot) => updateTrackBot(bot, dt));
   }
 
+  updateTraffic(dt);
+  updatePedestrians(dt);
   updatePolice(dt);
+  updateMission(dt);
   updatePickups(dt);
   updateInteractionTarget();
   updateMarkers();
 
   updateVehicleTransform(player, dt);
   updateVehicleTransform(policeCar, dt);
+  trafficVehicles.forEach((vehicle) => {
+    if (vehicle.active) {
+      updateVehicleTransform(vehicle, dt);
+    }
+  });
   trackBots.forEach((bot) => updateVehicleTransform(bot, dt));
   updateAvatarTransform();
   updateCamera(dt);
+  renderMinimap();
+
+  if (state.accountId) {
+    state.autoSaveTimer += dt;
+    if (state.autoSaveTimer >= AUTOSAVE_INTERVAL) {
+      state.autoSaveTimer = 0;
+      saveToActiveAccount(false);
+    }
+  }
 
   renderUi();
   renderer.render(scene, camera);
@@ -3332,5 +4690,8 @@ setupLighting();
 populateWorld();
 setupInput();
 window.addEventListener('resize', handleResize);
+window.addEventListener('beforeunload', () => {
+  saveToActiveAccount(false);
+});
 renderUi();
 renderer.setAnimationLoop(animate);
