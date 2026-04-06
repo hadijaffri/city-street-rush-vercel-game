@@ -183,6 +183,8 @@ const carCatalog = [
     name: 'Starter Coupe',
     price: 0,
     color: 0x4cc9f0,
+    class: 'drift',
+    unlockLevel: 1,
     maxSpeedBonus: 0,
     accelBonus: 0,
   },
@@ -191,6 +193,8 @@ const carCatalog = [
     name: 'Sprinter GT',
     price: 260,
     color: 0xff595e,
+    class: 'speed',
+    unlockLevel: 2,
     maxSpeedBonus: 7,
     accelBonus: 5,
   },
@@ -199,10 +203,72 @@ const carCatalog = [
     name: 'Executive LX',
     price: 520,
     color: 0x80ed99,
+    class: 'tank',
+    unlockLevel: 4,
     maxSpeedBonus: 12,
     accelBonus: 8,
   },
+  {
+    id: 'vortex',
+    name: 'Vortex RS',
+    price: 860,
+    color: 0x5e60ce,
+    class: 'speed',
+    unlockLevel: 6,
+    maxSpeedBonus: 18,
+    accelBonus: 14,
+  },
+  {
+    id: 'ironclad',
+    name: 'Ironclad XR',
+    price: 980,
+    color: 0x6c757d,
+    class: 'tank',
+    unlockLevel: 7,
+    maxSpeedBonus: 9,
+    accelBonus: 10,
+  },
+  {
+    id: 'sidewinder',
+    name: 'Sidewinder Drift',
+    price: 940,
+    color: 0xff9f1c,
+    class: 'drift',
+    unlockLevel: 8,
+    maxSpeedBonus: 13,
+    accelBonus: 12,
+  },
 ];
+
+const carClassConfig = {
+  speed: { label: 'Speed', hp: 86, speed: 1.18, accel: 1.14, turn: 0.9, armor: 0.82 },
+  tank: { label: 'Tank', hp: 145, speed: 0.9, accel: 0.88, turn: 0.76, armor: 1.22 },
+  drift: { label: 'Drift', hp: 105, speed: 1.02, accel: 1.02, turn: 1.27, armor: 1.0 },
+};
+
+const gameModes = [
+  { id: 'free', name: 'City Free Roam', description: 'Open world driving with jobs, traffic, and police.' },
+  { id: 'race', name: 'Race Mode', description: 'Classic lap racing with bots and checkpoints.' },
+  { id: 'battle', name: 'Battle Arena', description: 'Arena combat with power-ups and vehicle HP.' },
+  { id: 'police', name: 'Police Chase Mode', description: 'Play as runner or cop in pursuit mode.' },
+  { id: 'elimination', name: 'Elimination Mode', description: 'Last car with HP remaining wins.' },
+  { id: 'time-trial', name: 'Time Trial Ghosts', description: 'Race your previous best ghost run.' },
+];
+
+const mapPresets = [
+  { id: 'city', name: 'City', center: CITY_SPAWN.clone(), weather: 'clear', grip: 1, description: 'Traffic + tight turns.' },
+  { id: 'desert', name: 'Desert', center: new THREE.Vector3(760, 0, -120), weather: 'clear', grip: 0.95, description: 'Open roads and long slides.' },
+  { id: 'snow', name: 'Snow', center: new THREE.Vector3(-860, 0, 240), weather: 'fog', grip: 0.72, description: 'Low traction and icy corners.' },
+  { id: 'highway', name: 'Highway', center: new THREE.Vector3(0, 0, -840), weather: 'clear', grip: 1.02, description: 'High-speed straight chaos.' },
+  { id: 'stunt', name: 'Stunt Park', center: new THREE.Vector3(930, 0, 930), weather: 'clear', grip: 0.9, description: 'Ramps and wild jumps.' },
+];
+
+const powerupDefinitions = {
+  speed: { name: 'Speed Boost', key: '1', color: 0x4cc9f0, duration: 4.5 },
+  emp: { name: 'EMP Blast', key: '2', color: 0xb388eb, duration: 3.2 },
+  oil: { name: 'Oil Spill', key: '3', color: 0x1b1f25, duration: 6.2 },
+  shield: { name: 'Shield', key: '4', color: 0x80ed99, duration: 4.6 },
+};
 
 const pickupCatalog = [
   { name: 'Street Parcel', value: 18, color: 0xffbe0b },
@@ -278,6 +344,53 @@ if (!accountBook || typeof accountBook !== 'object' || Array.isArray(accountBook
 
 const state = {
   mode: 'driving',
+  gameMode: 'free',
+  currentMap: 'city',
+  policeChaseRole: 'runner',
+  controlChaosEnabled: false,
+  controlChaosTimer: 30,
+  controlChaosEffect: null,
+  powerupInventory: {
+    speed: 0,
+    emp: 0,
+    oil: 0,
+    shield: 0,
+  },
+  activeEffects: {
+    speedBoost: 0,
+    emp: 0,
+    shield: 0,
+    reverseSteer: 0,
+    lowGravity: 0,
+    superSpeed: 0,
+  },
+  selectedCarClass: 'drift',
+  paintColor: null,
+  neonColor: '#4cc9f0',
+  smokeColor: '#d7e3fc',
+  spoilerLevel: 0,
+  bodyKitLevel: 0,
+  driftDistance: 0,
+  lastDriftToastAt: -999,
+  nitroCooldown: 0,
+  xp: 0,
+  level: 1,
+  achievements: [],
+  dailyChallenges: {
+    driftMeters: 1000,
+    raceWins: 2,
+    lawfulSeconds: 120,
+    progress: {
+      driftMeters: 0,
+      raceWins: 0,
+      lawfulSeconds: 0,
+    },
+    completed: {
+      driftMeters: false,
+      raceWins: false,
+      lawfulSeconds: false,
+    },
+  },
   accountId: activeAccountId,
   accountName: null,
   money: 180,
@@ -329,10 +442,25 @@ const state = {
   weather: 'clear',
   weatherTimer: 45,
   weatherGripFactor: 1,
+  mapGripFactor: 1,
   trafficDensity: 1,
   inInterior: false,
   interiorPlaceId: null,
   interiorReturnSnapshot: null,
+  arenaActive: false,
+  arenaCountdown: 0,
+  arenaPlayerHp: 100,
+  arenaBotsAlive: 0,
+  arenaWinner: null,
+  arenaPowerups: [],
+  oilSpills: [],
+  ghostEnabled: false,
+  ghostRecording: [],
+  ghostPlayback: null,
+  ghostPlaybackIndex: 0,
+  bestLapTime: null,
+  currentLapTime: 0,
+  lapStartTime: 0,
   deviceMode: savedDeviceMode || null,
   lookSensitivity: clamp(Number.isFinite(savedLookSensitivity) ? savedLookSensitivity : 1, 0.4, 2.5),
   steeringSensitivity: clamp(Number.isFinite(savedSteerSensitivity) ? savedSteerSensitivity : 1, 0.6, 2),
@@ -348,6 +476,7 @@ const state = {
   nextRoadblockAt: 0,
   nextSpikeStripAt: 0,
   lastConditionHitTime: -10,
+  lastCoachTipAt: -999,
   autoSaveTimer: 0,
   fps: 60,
 };
@@ -396,6 +525,10 @@ const pedestrians = [];
 const roadblocks = [];
 const spikeStrips = [];
 const interiors = new Map();
+const driftSmokeParticles = [];
+const arenaPowerupObjects = [];
+const oilSpillObjects = [];
+const mapLandmarks = [];
 
 function getChunkIndex(value) {
   return Math.floor((value + CHUNK_SIZE / 2) / CHUNK_SIZE);
@@ -602,6 +735,11 @@ function createCarMesh(colorValue, police = false) {
   const frontWheelPivots = group.userData.frontWheelPivots || [];
   const wheelMeshes = group.userData.wheels || [];
   const sirens = group.userData.beacons || [];
+  const bodyMesh = group.userData.bodyMesh || null;
+  const hoodMesh = group.userData.hoodMesh || null;
+  const roofMesh = group.userData.roofMesh || null;
+  const headlightMeshes = group.userData.headlightMeshes || [];
+  const taillightMeshes = group.userData.taillightMeshes || [];
 
   // The imported model points down +Z, while gameplay heading points down +X.
   // This offset keeps vehicle movement and visuals aligned.
@@ -613,6 +751,11 @@ function createCarMesh(colorValue, police = false) {
     frontWheelPivots,
     wheelMeshes,
     sirens,
+    bodyMesh,
+    hoodMesh,
+    roofMesh,
+    headlightMeshes,
+    taillightMeshes,
     headingOffset,
     groundOffset: 0.03,
   };
@@ -736,6 +879,31 @@ const trackBots = [
     turnRate: 1.8,
   }),
 ];
+const ghostVehicle = createGhostVehicle();
+
+function createGhostVehicle() {
+  const mesh = createCarMesh(0xffffff, false);
+  mesh.group.visible = false;
+  mesh.group.traverse((child) => {
+    if (child.isMesh && child.material) {
+      child.material = child.material.clone();
+      child.material.transparent = true;
+      child.material.opacity = child.material.opacity !== undefined ? Math.min(child.material.opacity, 0.35) : 0.35;
+      child.material.depthWrite = false;
+    }
+  });
+  scene.add(mesh.group);
+  return {
+    mesh,
+    visible: false,
+    frameIndex: 0,
+    playback: [],
+    position: TRACK_SPAWN.clone(),
+    heading: 0,
+    speed: 0,
+    steerAngle: 0,
+  };
+}
 
 const cityTrafficRoute = [
   new THREE.Vector3(-150, 0, -70),
@@ -1644,6 +1812,73 @@ function createInteriors() {
   });
 }
 
+function createMapLandmarks() {
+  mapPresets.forEach((preset) => {
+    if (preset.id === 'stunt') {
+      for (let i = 0; i < 3; i += 1) {
+        const ramp = new THREE.Mesh(
+          new THREE.BoxGeometry(10, 2.2, 18),
+          new THREE.MeshStandardMaterial({ color: 0x495057, roughness: 0.78 }),
+        );
+        ramp.position.set(preset.center.x - 20 + i * 24, terrainHeightAt(preset.center.x, preset.center.z) + 1.2, preset.center.z + 8 + i * 6);
+        ramp.rotation.x = -0.35;
+        scene.add(ramp);
+        addBoxCollider(
+          ramp.position.x - 6,
+          ramp.position.x + 6,
+          ramp.position.z - 9,
+          ramp.position.z + 9,
+          { damage: 5, tag: `landmark-${preset.id}-${i}` },
+        );
+        mapLandmarks.push(ramp);
+      }
+      const loop = new THREE.Mesh(
+        new THREE.TorusGeometry(12, 1.1, 14, 44),
+        new THREE.MeshStandardMaterial({ color: 0xadb5bd, roughness: 0.55, metalness: 0.25 }),
+      );
+      loop.position.set(preset.center.x + 48, terrainHeightAt(preset.center.x, preset.center.z) + 13, preset.center.z - 16);
+      loop.rotation.y = Math.PI / 2;
+      scene.add(loop);
+      mapLandmarks.push(loop);
+    }
+    if (preset.id === 'desert') {
+      for (let i = 0; i < 8; i += 1) {
+        const cactus = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.6, 0.8, 5 + (i % 3), 9),
+          new THREE.MeshStandardMaterial({ color: 0x5f8f3d, roughness: 0.88 }),
+        );
+        const x = preset.center.x - 70 + i * 18;
+        const z = preset.center.z - 24 + (i % 2) * 32;
+        cactus.position.set(x, terrainHeightAt(x, z) + 2.6, z);
+        scene.add(cactus);
+        mapLandmarks.push(cactus);
+      }
+    }
+    if (preset.id === 'snow') {
+      for (let i = 0; i < 8; i += 1) {
+        const mound = new THREE.Mesh(
+          new THREE.SphereGeometry(2.2 + (i % 3) * 0.4, 12, 12),
+          new THREE.MeshStandardMaterial({ color: 0xeaf4ff, roughness: 0.95 }),
+        );
+        const x = preset.center.x - 60 + i * 16;
+        const z = preset.center.z + ((i % 2) * 2 - 1) * 30;
+        mound.position.set(x, terrainHeightAt(x, z) + 1.2, z);
+        scene.add(mound);
+        mapLandmarks.push(mound);
+      }
+    }
+    if (preset.id === 'highway') {
+      const median = new THREE.Mesh(
+        new THREE.BoxGeometry(260, 0.3, 6),
+        new THREE.MeshStandardMaterial({ color: 0x495057, roughness: 0.8 }),
+      );
+      median.position.set(preset.center.x, terrainHeightAt(preset.center.x, preset.center.z) + 0.16, preset.center.z);
+      scene.add(median);
+      mapLandmarks.push(median);
+    }
+  });
+}
+
 function createPickups() {
   pickupSpawns.forEach((spawn, index) => {
     const type = pickupCatalog[index % pickupCatalog.length];
@@ -1686,21 +1921,126 @@ function getCarProfile() {
   return carCatalog.find((car) => car.id === state.carModelId) || carCatalog[0];
 }
 
+function getCarClassForProfile(profile = getCarProfile()) {
+  return carClassConfig[profile.class || state.selectedCarClass] || carClassConfig.drift;
+}
+
+function levelXpRequirement(level) {
+  return 220 + (level - 1) * 130;
+}
+
+function awardXp(amount, source = 'Activity') {
+  if (amount <= 0) {
+    return;
+  }
+  state.xp += amount;
+  let leveledUp = false;
+  while (state.xp >= levelXpRequirement(state.level)) {
+    state.xp -= levelXpRequirement(state.level);
+    state.level += 1;
+    leveledUp = true;
+  }
+  if (leveledUp) {
+    showToast(`Level up! You are now level ${state.level}.`);
+  } else if (amount >= 35) {
+    showToast(`${source}: +${Math.round(amount)} XP`);
+  }
+  markUiDirty();
+}
+
+function unlockAchievement(id, label) {
+  if (state.achievements.includes(id)) {
+    return;
+  }
+  state.achievements.push(id);
+  showToast(`Achievement unlocked: ${label}`);
+  awardXp(55, 'Achievement');
+}
+
+function updateProgressMetric(metric, amount) {
+  if (!state.dailyChallenges?.progress || !(metric in state.dailyChallenges.progress)) {
+    return;
+  }
+  state.dailyChallenges.progress[metric] = Math.max(
+    0,
+    state.dailyChallenges.progress[metric] + amount,
+  );
+}
+
 function applyPlayerCarTuning() {
   const profile = getCarProfile();
+  const classProfile = getCarClassForProfile(profile);
   const conditionFactor = lerp(0.45, 1, state.carCondition / 100);
   const tireDamageFactor = state.tireDamageTimer > 0 ? 0.72 : 1;
-  const weatherGrip = state.weatherGripFactor || 1;
+  const weatherGrip = (state.weatherGripFactor || 1) * (state.mapGripFactor || 1);
+  const chaosSpeedBoost = state.activeEffects.superSpeed > 0 ? 1.22 : 1;
   player.maxSpeed =
     (52 + profile.maxSpeedBonus + state.engineLevel * 7 + state.turboLevel * 3) *
+    classProfile.speed *
+    chaosSpeedBoost *
     conditionFactor *
     tireDamageFactor;
-  player.acceleration = (32 + profile.accelBonus + state.engineLevel * 5 + state.turboLevel * 3) * weatherGrip;
+  player.acceleration =
+    (32 + profile.accelBonus + state.engineLevel * 5 + state.turboLevel * 3) *
+    classProfile.accel *
+    chaosSpeedBoost *
+    weatherGrip;
   player.turnRate =
     (1.86 + state.handlingLevel * 0.24 + state.tireGripLevel * 0.12 + state.suspensionLevel * 0.08) *
+    classProfile.turn *
     weatherGrip *
     state.steeringSensitivity;
-  player.mesh.bodyMaterial.color.setHex(profile.color);
+  const paintHex = state.paintColor || profile.color;
+  const parsedPaintHex =
+    typeof paintHex === 'string' ? Number.parseInt(paintHex.replace('#', '0x'), 16) : paintHex;
+  player.mesh.bodyMaterial.color.setHex(Number.isFinite(parsedPaintHex) ? parsedPaintHex : profile.color);
+}
+
+function ensurePlayerCosmetics() {
+  if (player.mesh.group.userData.customNodes) {
+    return player.mesh.group.userData.customNodes;
+  }
+  const nodes = {};
+  const spoiler = new THREE.Mesh(
+    new THREE.BoxGeometry(1.5, 0.08, 0.32),
+    new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.45, metalness: 0.35 }),
+  );
+  spoiler.position.set(0, 1.38, -2.05);
+  spoiler.visible = false;
+  player.mesh.group.add(spoiler);
+
+  const bodyKit = new THREE.Mesh(
+    new THREE.BoxGeometry(2.24, 0.08, 4.7),
+    new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.5, metalness: 0.3 }),
+  );
+  bodyKit.position.set(0, 0.26, 0);
+  bodyKit.visible = false;
+  player.mesh.group.add(bodyKit);
+
+  const neon = new THREE.Mesh(
+    new THREE.BoxGeometry(2.0, 0.04, 4.1),
+    new THREE.MeshBasicMaterial({ color: 0x4cc9f0, transparent: true, opacity: 0.45 }),
+  );
+  neon.position.set(0, 0.2, 0);
+  neon.visible = true;
+  player.mesh.group.add(neon);
+
+  nodes.spoiler = spoiler;
+  nodes.bodyKit = bodyKit;
+  nodes.neon = neon;
+  player.mesh.group.userData.customNodes = nodes;
+  return nodes;
+}
+
+function updatePlayerCosmetics() {
+  const nodes = ensurePlayerCosmetics();
+  nodes.spoiler.visible = state.spoilerLevel > 0;
+  nodes.spoiler.scale.set(1 + state.spoilerLevel * 0.16, 1, 1 + state.spoilerLevel * 0.12);
+  nodes.bodyKit.visible = state.bodyKitLevel > 0;
+  nodes.bodyKit.scale.set(1 + state.bodyKitLevel * 0.04, 1, 1 + state.bodyKitLevel * 0.03);
+  const neonHex = Number.parseInt((state.neonColor || '#4cc9f0').replace('#', '0x'), 16);
+  nodes.neon.material.color.setHex(Number.isFinite(neonHex) ? neonHex : 0x4cc9f0);
+  nodes.neon.visible = state.mode === 'driving' || state.trackRaceActive || state.gameMode !== 'free';
 }
 
 function persistSettings() {
@@ -1753,6 +2093,22 @@ function captureSaveSnapshot() {
       missionsCompleted: state.missionsCompleted,
       weather: state.weather,
       dayTime: state.dayTime,
+      gameMode: state.gameMode,
+      currentMap: state.currentMap,
+      policeChaseRole: state.policeChaseRole,
+      selectedCarClass: state.selectedCarClass,
+      paintColor: state.paintColor,
+      neonColor: state.neonColor,
+      smokeColor: state.smokeColor,
+      spoilerLevel: state.spoilerLevel,
+      bodyKitLevel: state.bodyKitLevel,
+      controlChaosEnabled: state.controlChaosEnabled,
+      xp: state.xp,
+      level: state.level,
+      achievements: state.achievements,
+      dailyChallenges: state.dailyChallenges,
+      bestLapTime: state.bestLapTime,
+      ghostPlayback: state.ghostPlayback,
     },
     player: {
       position: { x: player.position.x, z: player.position.z },
@@ -1800,6 +2156,31 @@ function applySaveSnapshot(snapshot) {
   state.missionsCompleted = Math.max(0, safeState.missionsCompleted || 0);
   state.weather = ['clear', 'rain', 'fog'].includes(safeState.weather) ? safeState.weather : 'clear';
   state.dayTime = clamp(safeState.dayTime ?? 10.5, 0, 24);
+  state.gameMode = gameModes.some((mode) => mode.id === safeState.gameMode) ? safeState.gameMode : 'free';
+  state.currentMap = mapPresets.some((map) => map.id === safeState.currentMap) ? safeState.currentMap : 'city';
+  state.policeChaseRole = safeState.policeChaseRole === 'cop' ? 'cop' : 'runner';
+  state.selectedCarClass = ['speed', 'tank', 'drift'].includes(safeState.selectedCarClass)
+    ? safeState.selectedCarClass
+    : 'drift';
+  state.paintColor = typeof safeState.paintColor === 'string' ? safeState.paintColor : null;
+  state.neonColor = typeof safeState.neonColor === 'string' ? safeState.neonColor : '#4cc9f0';
+  state.smokeColor = typeof safeState.smokeColor === 'string' ? safeState.smokeColor : '#d7e3fc';
+  state.spoilerLevel = clamp(safeState.spoilerLevel ?? 0, 0, 3);
+  state.bodyKitLevel = clamp(safeState.bodyKitLevel ?? 0, 0, 3);
+  state.controlChaosEnabled = Boolean(safeState.controlChaosEnabled);
+  state.xp = Math.max(0, safeState.xp || 0);
+  state.level = Math.max(1, safeState.level || 1);
+  state.achievements = Array.isArray(safeState.achievements) ? safeState.achievements.slice(0, 64) : [];
+  if (safeState.dailyChallenges?.progress) {
+    state.dailyChallenges = safeState.dailyChallenges;
+    state.dailyChallenges.completed = state.dailyChallenges.completed || {
+      driftMeters: false,
+      raceWins: false,
+      lawfulSeconds: false,
+    };
+  }
+  state.bestLapTime = Number.isFinite(safeState.bestLapTime) ? safeState.bestLapTime : null;
+  state.ghostPlayback = Array.isArray(safeState.ghostPlayback) ? safeState.ghostPlayback.slice(0, 6000) : null;
   state.trackRaceActive = false;
   state.raceFinished = false;
   state.finishOrderCounter = 0;
@@ -1998,7 +2379,8 @@ function applyDeviceMode(mode, announce = true) {
 }
 
 function damageCar(amount, reason) {
-  const scaledAmount = amount * (1 - state.armorLevel * 0.12);
+  const classArmor = getCarClassForProfile().armor || 1;
+  const scaledAmount = amount * (1 - state.armorLevel * 0.12) / classArmor;
   state.carCondition = clamp(state.carCondition - scaledAmount, 0, 100);
   if (reason && elapsedTime - state.lastConditionHitTime > 1.5) {
     state.lastConditionHitTime = elapsedTime;
@@ -2122,6 +2504,12 @@ function buyUpgrade(cost, onSuccess, successMessage) {
 }
 
 function applyPenalty(amount, message, wantedHeat = 0.4) {
+  if (state.gameMode === 'battle' || state.gameMode === 'elimination' || state.gameMode === 'time-trial') {
+    return;
+  }
+  if (state.gameMode === 'police' && state.policeChaseRole === 'cop') {
+    return;
+  }
   if (state.wantedHeat <= 0.05) {
     state.wantedStartTime = elapsedTime;
   }
@@ -2363,6 +2751,7 @@ function workShift(place) {
   state.lastJobTimes[place.id] = elapsedTime;
   state.money += place.pay;
   showToast(`Shift complete. ${place.name} paid you ${formatMoney(place.pay)}.`);
+  awardXp(18, 'Work Shift');
   markUiDirty();
 }
 
@@ -2430,9 +2819,53 @@ function updateMission(dt) {
   }
 }
 
+function updateProgressionSystems(dt) {
+  const challenge = state.dailyChallenges;
+  if (challenge?.progress && challenge?.completed) {
+    ['driftMeters', 'raceWins', 'lawfulSeconds'].forEach((metric) => {
+      if (!challenge.completed[metric] && challenge.progress[metric] >= challenge[metric]) {
+        challenge.completed[metric] = true;
+        showToast(`Daily challenge complete: ${metric}.`);
+        awardXp(70, 'Daily Challenge');
+      }
+    });
+  }
+
+  if (state.driftDistance >= 1000) {
+    unlockAchievement('drift-1000', 'Drift 1000 meters');
+  }
+  if (state.carCondition <= 15) {
+    unlockAchievement('scrapyard-survivor', 'Scrapyard Survivor');
+  }
+  if (state.bestLapTime && state.bestLapTime < 65) {
+    unlockAchievement('lightning-lap', 'Lightning Lap');
+  }
+
+  if (state.mode === 'driving' && elapsedTime - state.lastCoachTipAt > 16) {
+    state.lastCoachTipAt = elapsedTime;
+    if (state.gas < 18) {
+      showToast('Coach AI: Gas is low. Set GPS to Fuel Plaza.');
+    } else if (state.carCondition < 35) {
+      showToast('Coach AI: Car condition is critical. Visit Torque Customs.');
+    } else if (state.wantedLevel >= 3) {
+      showToast('Coach AI: High wanted level. Use alleys and brake hard into corners.');
+    } else if (state.gameMode === 'time-trial' && state.bestLapTime) {
+      showToast(`Coach AI: Best lap is ${state.bestLapTime.toFixed(2)}s. Brake later into turn 2.`);
+    }
+  }
+
+  if (dt > 0 && state.mode === 'driving' && state.gameMode === 'free') {
+    awardXp(dt * 0.8, 'Driving');
+  }
+}
+
 function buyCarModel(carId) {
   const car = carCatalog.find((item) => item.id === carId);
   if (!car) {
+    return;
+  }
+  if (state.level < (car.unlockLevel || 1)) {
+    showToast(`Reach level ${car.unlockLevel} to unlock ${car.name}.`, 'bad');
     return;
   }
   if (state.carModelId === car.id) {
@@ -2443,7 +2876,9 @@ function buyCarModel(carId) {
     car.price,
     () => {
       state.carModelId = car.id;
+      state.selectedCarClass = car.class || state.selectedCarClass;
       applyPlayerCarTuning();
+      updatePlayerCosmetics();
     },
     `You bought the ${car.name}.`,
   );
@@ -2502,6 +2937,8 @@ function renderPhonePanel() {
       <div class="action-card">
         <strong>Player</strong>
         <div class="mini">Current Location: ${getDistrictName(playerReference)}</div>
+        <div class="mini">Game Mode: ${gameModes.find((mode) => mode.id === state.gameMode)?.name || 'City Free Roam'}</div>
+        <div class="mini">Map: ${mapPresets.find((map) => map.id === state.currentMap)?.name || 'City'}</div>
         <div class="mini">Wanted Level: ${state.wantedLevel}</div>
         <div class="mini">Job: ${state.currentJobId ? placeById.get(state.currentJobId).jobTitle : 'None'}</div>
         <div class="mini">Job Spots: Corner Cafe, Parcel Point, Tech Hub</div>
@@ -2543,6 +2980,7 @@ function renderPhonePanel() {
       <div class="action-list">
         <button data-phone-action="teleport-track">Teleport To Racetrack</button>
         <button data-phone-action="teleport-home">Return To City</button>
+        <button data-phone-action="open-modes">Game Modes</button>
         <button data-phone-action="open-missions">Missions</button>
         <button data-phone-action="open-store">Store</button>
         <button data-phone-action="open-account">Account</button>
@@ -2586,11 +3024,16 @@ function renderCenterPanel() {
           <strong>Invert Look Y</strong>
           <input type="checkbox" data-setting="invertLookY" ${state.invertLookY ? 'checked' : ''} />
         </div>
+        <div class="switch-row">
+          <strong>Control Chaos Mode</strong>
+          <input type="checkbox" data-setting="controlChaosEnabled" ${state.controlChaosEnabled ? 'checked' : ''} />
+        </div>
         <div class="action-card">
           <strong>Controls</strong>
           <div class="mini">Drive/Walk: WASD or Arrow Keys</div>
           <div class="mini">Interact: E, Enter/Exit Car: Space, Nitro: F</div>
-          <div class="mini">Phone: P, Missions: M, Store: O, Account: U</div>
+          <div class="mini">Phone: P, Modes: G, Missions: M, Store: O, Account: U</div>
+          <div class="mini">Power-Ups: 1 Speed, 2 EMP, 3 Oil, 4 Shield</div>
           <div class="mini">Backpack: B, Track: T, Reset: R</div>
         </div>
         <div class="action-list">
@@ -2599,6 +3042,44 @@ function renderCenterPanel() {
           <button data-center-action="device-mode" data-mode="auto">Use Auto Detect</button>
         </div>
       </div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'game-modes') {
+    const rows = gameModes
+      .map(
+        (mode) => `
+          <div class="shop-item">
+            <div>
+              <strong>${mode.name}</strong>
+              <div class="mini">${mode.description}</div>
+            </div>
+            <button data-center-action="set-mode" data-mode="${mode.id}" ${state.gameMode === mode.id ? 'disabled' : ''}>
+              ${state.gameMode === mode.id ? 'Active' : 'Play'}
+            </button>
+          </div>
+        `,
+      )
+      .join('');
+    centerPanelEl.innerHTML = `
+      <h2>Game Modes</h2>
+      <p class="mini">Current mode: ${gameModes.find((mode) => mode.id === state.gameMode)?.name || 'City Free Roam'}</p>
+      <div class="shop-list">${rows}</div>
+      <div class="action-list">
+        <button data-center-action="set-police-role" data-role="runner" ${state.policeChaseRole === 'runner' ? 'disabled' : ''}>Police Mode As Runner</button>
+        <button data-center-action="set-police-role" data-role="cop" ${state.policeChaseRole === 'cop' ? 'disabled' : ''}>Police Mode As Cop</button>
+      </div>
+      <h3>Maps</h3>
+      <div class="chip-row">
+        ${mapPresets
+          .map(
+            (map) =>
+              `<button data-center-action="set-map" data-map="${map.id}" ${state.currentMap === map.id ? 'disabled' : ''}>${map.name}</button>`,
+          )
+          .join('')}
+      </div>
+      <div class="mini">Current map: ${mapPresets.find((map) => map.id === state.currentMap)?.name || 'City'} | Chaos mode: ${state.controlChaosEnabled ? 'On' : 'Off'}</div>
     `;
     return;
   }
@@ -2630,7 +3111,21 @@ function renderCenterPanel() {
       <h2>Missions</h2>
       <p class="mini">Take contracts to earn bigger payouts and level up your city rep.</p>
       <div class="shop-list">${missionCards}</div>
-      <div class="mini">Missions completed: ${state.missionsCompleted}</div>
+      <div class="action-card">
+        <strong>Progression</strong>
+        <div class="mini">Level ${state.level} | XP ${Math.round(state.xp)}/${Math.round(levelXpRequirement(state.level))}</div>
+        <div class="mini">Missions completed: ${state.missionsCompleted}</div>
+      </div>
+      <div class="action-card">
+        <strong>Daily Challenges</strong>
+        <div class="mini">Drift: ${Math.floor(state.dailyChallenges.progress.driftMeters)}/${state.dailyChallenges.driftMeters}m ${state.dailyChallenges.completed.driftMeters ? '✅' : ''}</div>
+        <div class="mini">Race Wins: ${state.dailyChallenges.progress.raceWins}/${state.dailyChallenges.raceWins} ${state.dailyChallenges.completed.raceWins ? '✅' : ''}</div>
+        <div class="mini">Lawful Drive: ${Math.floor(state.dailyChallenges.progress.lawfulSeconds)}/${state.dailyChallenges.lawfulSeconds}s ${state.dailyChallenges.completed.lawfulSeconds ? '✅' : ''}</div>
+      </div>
+      <div class="action-card">
+        <strong>Achievements</strong>
+        <div class="mini">${state.achievements.length > 0 ? state.achievements.join(', ') : 'No achievements yet.'}</div>
+      </div>
     `;
     return;
   }
@@ -2810,25 +3305,53 @@ function renderCenterPanel() {
 
   if (place.type === 'dealer') {
     const carRows = carCatalog
-      .map(
-        (car) => `
+      .map((car) => {
+        const lockedByLevel = state.level < (car.unlockLevel || 1);
+        return `
           <div class="shop-item">
             <div>
               <strong>${car.name}</strong>
-              <div class="mini">Top speed +${car.maxSpeedBonus}, acceleration +${car.accelBonus}</div>
+              <div class="mini">Class: ${carClassConfig[car.class]?.label || 'Drift'} | Level ${car.unlockLevel || 1}+ | Top speed +${car.maxSpeedBonus}, acceleration +${car.accelBonus}</div>
             </div>
-            <button data-center-action="buy-car" data-car="${car.id}" ${state.carModelId === car.id ? 'disabled' : ''}>
-              ${state.carModelId === car.id ? 'Owned' : `Buy ${formatMoney(car.price)}`}
+            <button data-center-action="buy-car" data-car="${car.id}" ${state.carModelId === car.id || lockedByLevel ? 'disabled' : ''}>
+              ${
+                state.carModelId === car.id
+                  ? 'Owned'
+                  : lockedByLevel
+                    ? `Unlock Lv ${car.unlockLevel}`
+                    : `Buy ${formatMoney(car.price)}`
+              }
             </button>
           </div>
-        `,
-      )
+        `;
+      })
       .join('');
 
     centerPanelEl.innerHTML = `
       <h2>${place.name}</h2>
       <p class="mini">You have to drive here physically, hop out, and buy cars in person.</p>
       <div class="shop-list">${carRows}</div>
+      <div class="settings-grid">
+        <div class="settings-row">
+          <label><strong>Paint Color</strong></label>
+          <input type="color" value="${state.paintColor || '#4cc9f0'}" data-setting="paintColor" />
+        </div>
+        <div class="settings-row">
+          <label><strong>Neon Color</strong></label>
+          <input type="color" value="${state.neonColor}" data-setting="neonColor" />
+        </div>
+        <div class="settings-row">
+          <label><strong>Tire Smoke Color</strong></label>
+          <input type="color" value="${state.smokeColor}" data-setting="smokeColor" />
+        </div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="upgrade-spoiler">Upgrade Spoiler (${state.spoilerLevel}/3)</button>
+        <button data-center-action="upgrade-bodykit">Upgrade Body Kit (${state.bodyKitLevel}/3)</button>
+        <button data-center-action="choose-class" data-class="speed">Set Class: Speed</button>
+        <button data-center-action="choose-class" data-class="tank">Set Class: Tank</button>
+        <button data-center-action="choose-class" data-class="drift">Set Class: Drift</button>
+      </div>
       <div class="action-list">
         <button data-center-action="${state.inInterior ? 'leave-interior' : 'enter-interior'}" data-place="${place.id}">
           ${state.inInterior ? 'Leave Interior' : 'Enter Interior'}
@@ -2983,6 +3506,281 @@ function leaveInterior() {
   markUiDirty();
 }
 
+function clearArenaObjects() {
+  while (arenaPowerupObjects.length > 0) {
+    const obj = arenaPowerupObjects.pop();
+    scene.remove(obj.mesh);
+  }
+  while (oilSpillObjects.length > 0) {
+    const obj = oilSpillObjects.pop();
+    scene.remove(obj.mesh);
+  }
+}
+
+function resetArenaPowerups() {
+  clearArenaObjects();
+  const ringRadius = TRACK_INNER_RADIUS - 8;
+  ['speed', 'emp', 'oil', 'shield'].forEach((kind, index) => {
+    const angle = (index / 4) * Math.PI * 2;
+    const x = TRACK_CENTER.x + Math.cos(angle) * ringRadius;
+    const z = TRACK_CENTER.z + Math.sin(angle) * ringRadius;
+    const mesh = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(1.25, 0),
+      new THREE.MeshStandardMaterial({
+        color: powerupDefinitions[kind].color,
+        emissive: powerupDefinitions[kind].color,
+        emissiveIntensity: 0.36,
+        roughness: 0.35,
+      }),
+    );
+    mesh.position.set(x, terrainHeightAt(x, z) + 2.8, z);
+    scene.add(mesh);
+    arenaPowerupObjects.push({
+      kind,
+      mesh,
+      active: true,
+      respawnAt: 0,
+      bobOffset: index * 0.7,
+    });
+  });
+}
+
+function resetGamePowerupInventory() {
+  Object.keys(state.powerupInventory).forEach((key) => {
+    state.powerupInventory[key] = 0;
+  });
+}
+
+function buildLoopRoute(center, halfW, halfD) {
+  return [
+    new THREE.Vector3(center.x - halfW, 0, center.z - halfD),
+    new THREE.Vector3(center.x + halfW, 0, center.z - halfD),
+    new THREE.Vector3(center.x + halfW, 0, center.z + halfD),
+    new THREE.Vector3(center.x - halfW, 0, center.z + halfD),
+  ];
+}
+
+function switchMap(mapId, announce = true) {
+  const preset = mapPresets.find((map) => map.id === mapId);
+  if (!preset) {
+    return;
+  }
+  state.currentMap = preset.id;
+  state.mapGripFactor = preset.grip || 1;
+  state.weather = preset.weather || 'clear';
+  state.weatherTimer = 42;
+  state.trackRaceActive = false;
+  state.raceFinished = false;
+  state.arenaActive = false;
+  clearArenaObjects();
+
+  const spawn = preset.center.clone();
+  player.position.copy(spawn);
+  player.heading = 0;
+  player.speed = 0;
+  if (state.mode === 'walking') {
+    avatar.position.copy(spawn.clone().add(new THREE.Vector3(0, 0, 5)));
+  }
+  const trafficRoute = buildLoopRoute(spawn, 150, 70);
+  trafficVehicles.forEach((vehicle, index) => {
+    vehicle.patrolRoute = trafficRoute;
+    vehicle.routeIndex = (index + 1) % trafficRoute.length;
+    const start = trafficRoute[index % trafficRoute.length];
+    const next = trafficRoute[(index + 1) % trafficRoute.length];
+    vehicle.position.copy(start);
+    vehicle.heading = headingFromPoints(start, next);
+    vehicle.speed = 0;
+  });
+  const pedRoute = buildLoopRoute(spawn, 105, 105);
+  pedestrians.forEach((ped, index) => {
+    ped.route = pedRoute;
+    const start = pedRoute[index % pedRoute.length];
+    ped.routeIndex = (index + 1) % pedRoute.length;
+    ped.position.copy(start);
+    ped.heading = 0;
+  });
+  if (announce) {
+    showToast(`Loaded map: ${preset.name}. ${preset.description}`);
+  }
+  applyPlayerCarTuning();
+  markUiDirty();
+}
+
+function setGameMode(modeId, options = {}) {
+  const mode = gameModes.find((entry) => entry.id === modeId);
+  if (!mode) {
+    return;
+  }
+  state.gameMode = modeId;
+  state.trackRaceActive = false;
+  state.raceFinished = false;
+  state.finishOrderCounter = 0;
+  state.arenaActive = false;
+  state.arenaWinner = null;
+  state.arenaCountdown = 0;
+  state.arenaPlayerHp = getCarClassForProfile().hp;
+  state.ghostEnabled = false;
+  state.ghostRecording = [];
+  state.ghostPlayback = null;
+  state.ghostPlaybackIndex = 0;
+  state.currentLapTime = 0;
+  state.lapStartTime = elapsedTime;
+  state.controlChaosTimer = 30;
+  state.controlChaosEffect = null;
+  state.activeEffects.speedBoost = 0;
+  state.activeEffects.emp = 0;
+  state.activeEffects.shield = 0;
+  state.activeEffects.reverseSteer = 0;
+  state.activeEffects.lowGravity = 0;
+  state.activeEffects.superSpeed = 0;
+  state.nitroCooldown = 0;
+  state.policeChaseRole = options.policeRole === 'cop' ? 'cop' : state.policeChaseRole;
+  resetGamePowerupInventory();
+  clearArenaObjects();
+
+  if (modeId === 'race') {
+    teleportToTrack();
+    state.gameMode = 'race';
+    state.trackRaceActive = true;
+    trackBots.forEach((bot) => {
+      bot.mesh.group.visible = true;
+      bot.alive = true;
+      bot.hp = 100;
+    });
+    showToast('Race Mode started.');
+  } else if (modeId === 'battle') {
+    teleportToTrack();
+    state.gameMode = 'battle';
+    state.trackRaceActive = false;
+    state.arenaActive = true;
+    state.arenaPlayerHp = getCarClassForProfile().hp;
+    state.arenaCountdown = 3;
+    trackBots.forEach((bot, index) => {
+      bot.hp = 100;
+      bot.alive = true;
+      bot.finishedOrder = null;
+      bot.position.copy(TRACK_SPAWN).add(new THREE.Vector3(-10 - index * 8, 0, 16 + index * 5));
+      bot.heading = 0;
+      bot.speed = 0;
+      bot.routeIndex = 1;
+    });
+    resetArenaPowerups();
+    showToast('Battle Arena started. Collect power-ups and survive.');
+  } else if (modeId === 'police') {
+    teleportHome();
+    state.gameMode = 'police';
+    state.trackRaceActive = false;
+    state.wantedHeat = options.policeRole === 'runner' ? 3.2 : 0;
+    state.wantedTimer = options.policeRole === 'runner' ? 80 : 0;
+    state.wantedLevel = options.policeRole === 'runner' ? 3 : 0;
+    state.policeChaseRole = options.policeRole === 'cop' ? 'cop' : 'runner';
+    if (state.policeChaseRole === 'cop') {
+      trackBots.forEach((bot, index) => {
+        bot.alive = true;
+        bot.hp = 70;
+        bot.mesh.group.visible = true;
+        bot.position.copy(CITY_SPAWN).add(new THREE.Vector3(22 + index * 7, 0, 22 + index * 3));
+        bot.heading = 0;
+        bot.speed = 0;
+        bot.routeIndex = 0;
+      });
+      showToast('Police Chase Mode: You are the cop. Disable the runners.');
+    } else {
+      trackBots.forEach((bot) => {
+        bot.mesh.group.visible = false;
+        bot.alive = false;
+      });
+      showToast('Police Chase Mode: You are runner. Escape pursuit.');
+    }
+  } else if (modeId === 'elimination') {
+    teleportToTrack();
+    state.gameMode = 'elimination';
+    state.trackRaceActive = false;
+    state.arenaActive = true;
+    state.arenaPlayerHp = getCarClassForProfile().hp;
+    state.arenaCountdown = 3;
+    trackBots.forEach((bot, index) => {
+      bot.hp = 90;
+      bot.alive = true;
+      bot.position.copy(TRACK_SPAWN).add(new THREE.Vector3(-10 - index * 7, 0, 14 + index * 4));
+      bot.heading = 0;
+      bot.speed = 0;
+      bot.routeIndex = 1;
+    });
+    resetArenaPowerups();
+    showToast('Elimination Mode started. Last car standing wins.');
+  } else if (modeId === 'time-trial') {
+    teleportToTrack();
+    state.gameMode = 'time-trial';
+    state.trackRaceActive = true;
+    state.ghostEnabled = true;
+    state.ghostRecording = [];
+    state.currentLapTime = 0;
+    state.lapStartTime = elapsedTime;
+    trackBots.forEach((bot) => {
+      bot.speed = 0;
+      bot.mesh.group.visible = false;
+    });
+    if (Array.isArray(state.ghostPlayback) && state.ghostPlayback.length > 0) {
+      ghostVehicle.playback = state.ghostPlayback;
+      ghostVehicle.frameIndex = 0;
+      ghostVehicle.mesh.group.visible = true;
+    } else {
+      ghostVehicle.mesh.group.visible = false;
+    }
+    showToast('Time Trial started. Beat your best ghost.');
+  } else {
+    teleportHome();
+    state.gameMode = 'free';
+    trackBots.forEach((bot) => {
+      bot.mesh.group.visible = false;
+      bot.alive = false;
+    });
+    ghostVehicle.mesh.group.visible = false;
+    showToast('Back to Free Roam.');
+  }
+  markUiDirty();
+}
+
+function usePowerup(kind) {
+  if (!powerupDefinitions[kind]) {
+    return;
+  }
+  if (state.powerupInventory[kind] <= 0) {
+    showToast(`${powerupDefinitions[kind].name} not available.`, 'bad');
+    return;
+  }
+  state.powerupInventory[kind] -= 1;
+  if (kind === 'speed') {
+    state.activeEffects.speedBoost = powerupDefinitions.speed.duration;
+    showToast('Speed Boost activated.');
+  } else if (kind === 'emp') {
+    state.activeEffects.emp = powerupDefinitions.emp.duration;
+    showToast('EMP blast triggered.');
+    trackBots.forEach((bot) => {
+      if (distanceXZ(bot.position, player.position) < 28) {
+        bot.speed *= 0.32;
+      }
+    });
+  } else if (kind === 'oil') {
+    const drop = new THREE.Mesh(
+      new THREE.CircleGeometry(2.2, 16),
+      new THREE.MeshStandardMaterial({ color: 0x0f1115, roughness: 0.9, metalness: 0.1 }),
+    );
+    const x = player.position.x - Math.cos(player.heading) * 3.4;
+    const z = player.position.z - Math.sin(player.heading) * 3.4;
+    drop.rotation.x = -Math.PI / 2;
+    drop.position.set(x, terrainHeightAt(x, z) + 0.12, z);
+    scene.add(drop);
+    oilSpillObjects.push({ mesh: drop, position: new THREE.Vector3(x, 0, z), expiresAt: elapsedTime + 10 });
+    showToast('Oil spill dropped.');
+  } else if (kind === 'shield') {
+    state.activeEffects.shield = powerupDefinitions.shield.duration;
+    showToast('Shield online.');
+  }
+  markUiDirty();
+}
+
 function getTrackProgress(vehicle) {
   if (vehicle.finishedOrder !== null) {
     return TOTAL_LAPS + 1 - vehicle.finishedOrder * 0.001;
@@ -3019,6 +3817,32 @@ function registerFinish(vehicle) {
 }
 
 function onPlayerTrackLapComplete() {
+  const lapTime = Math.max(0.1, elapsedTime - state.lapStartTime);
+  state.lapStartTime = elapsedTime;
+  if (state.gameMode === 'time-trial') {
+    if (!state.bestLapTime || lapTime < state.bestLapTime) {
+      state.bestLapTime = lapTime;
+      state.ghostPlayback = state.ghostRecording.slice();
+      ghostVehicle.playback = state.ghostPlayback;
+      ghostVehicle.frameIndex = 0;
+      showToast(`New best lap: ${lapTime.toFixed(2)}s`, 'good');
+      awardXp(120, 'Time Trial Best');
+      unlockAchievement('ghost-crusher', 'Ghost Crusher');
+    } else {
+      showToast(`Lap ${lapTime.toFixed(2)}s. Best ${state.bestLapTime.toFixed(2)}s.`);
+      awardXp(45, 'Time Trial Lap');
+    }
+    state.ghostRecording = [];
+    state.money += 40;
+    state.lawfulPayout = 100;
+    state.speedingTimer = 0;
+    state.offRoadTimer = 0;
+    player.laps = 0;
+    player.routeIndex = 1;
+    markUiDirty();
+    return;
+  }
+
   const payout = Math.round(state.lawfulPayout);
   state.money += payout;
   showToast(
@@ -3039,10 +3863,15 @@ function onPlayerTrackLapComplete() {
     const bonusByRank = [0, 250, 160, 100, 60];
     const bonus = bonusByRank[rank] || 40;
     state.money += bonus;
+    awardXp(rank === 1 ? 170 : 100, 'Race Finish');
+    updateProgressMetric('raceWins', rank === 1 ? 1 : 0);
     showToast(
       `Race finished in ${ordinal(rank)} place. Finish bonus ${formatMoney(bonus)}. Press N to race again.`,
       rank === 1 ? 'good' : 'bad',
     );
+    if (rank === 1) {
+      unlockAchievement('podium-king', 'Podium King');
+    }
   }
   markUiDirty();
 }
@@ -3100,6 +3929,9 @@ function resetTrackRace() {
     bot.routeIndex = 1;
     bot.laps = 0;
     bot.finishedOrder = null;
+    bot.alive = true;
+    bot.hp = 100;
+    bot.mesh.group.visible = true;
   });
 
   state.trackRaceActive = true;
@@ -3111,6 +3943,17 @@ function resetTrackRace() {
   state.cityBonusTimer = 0;
   state.speedingTimer = 0;
   state.offRoadTimer = 0;
+  state.currentLapTime = 0;
+  state.lapStartTime = elapsedTime;
+  state.ghostRecording = [];
+  if (state.gameMode === 'time-trial' && Array.isArray(state.ghostPlayback) && state.ghostPlayback.length > 0) {
+    ghostVehicle.playback = state.ghostPlayback;
+    ghostVehicle.frameIndex = 0;
+    ghostVehicle.mesh.group.visible = true;
+  } else {
+    ghostVehicle.playback = null;
+    ghostVehicle.mesh.group.visible = false;
+  }
   closePanels();
   markUiDirty();
 }
@@ -3118,6 +3961,10 @@ function resetTrackRace() {
 function performReset() {
   if (state.inInterior) {
     leaveInterior();
+    return;
+  }
+  if (state.gameMode === 'battle' || state.gameMode === 'elimination' || state.gameMode === 'time-trial') {
+    setGameMode(state.gameMode, { policeRole: state.policeChaseRole });
     return;
   }
   if (distanceXZ(player.position, TRACK_CENTER) < 180 || state.trackRaceActive) {
@@ -3143,6 +3990,16 @@ function updateTrafficLights(dt) {
 }
 
 function updateWanted(dt) {
+  if (state.gameMode === 'battle' || state.gameMode === 'elimination' || state.gameMode === 'time-trial') {
+    state.wantedHeat = moveTowards(state.wantedHeat, 0, dt * 1.8);
+    state.wantedTimer = 0;
+    state.wantedLevel = Math.max(0, Math.ceil(state.wantedHeat - 0.05));
+    return;
+  }
+  if (state.gameMode === 'police' && state.policeChaseRole === 'runner') {
+    state.wantedHeat = Math.max(state.wantedHeat, 2.6);
+    state.wantedTimer = Math.max(state.wantedTimer, 45);
+  }
   if (state.trackRaceActive) {
     return;
   }
@@ -3413,12 +4270,22 @@ function updatePolice(dt) {
 }
 
 function updateTrackBot(bot, dt) {
+  if (state.gameMode === 'time-trial') {
+    bot.speed = moveTowards(bot.speed, 0, dt * 12);
+    return;
+  }
+  if (bot.alive === false) {
+    bot.speed = moveTowards(bot.speed, 0, dt * 30);
+    return;
+  }
   const target = trackRoute[bot.routeIndex];
   const desiredHeading = headingFromPoints(bot.position, target);
   bot.steerAngle = moveTowards(bot.steerAngle, normalizeAngle(desiredHeading - bot.heading), dt * 2.8);
   bot.heading = moveAngleTowards(bot.heading, desiredHeading, bot.turnRate * dt);
   const distanceToTarget = distanceXZ(bot.position, target);
-  const targetSpeed = distanceToTarget < 18 ? bot.maxSpeed * 0.52 : bot.maxSpeed;
+  const progressDelta = getTrackProgress(player) - getTrackProgress(bot);
+  const adaptiveFactor = progressDelta > 0.18 ? 1.08 : progressDelta < -0.08 ? 0.94 : 1;
+  const targetSpeed = distanceToTarget < 18 ? bot.maxSpeed * 0.52 : bot.maxSpeed * adaptiveFactor;
   bot.speed = moveTowards(bot.speed, targetSpeed, (targetSpeed < bot.speed ? 22 : bot.acceleration) * dt);
   bot.position.x += Math.cos(bot.heading) * bot.speed * dt;
   bot.position.z += Math.sin(bot.heading) * bot.speed * dt;
@@ -3426,6 +4293,234 @@ function updateTrackBot(bot, dt) {
     if (bot.laps >= TOTAL_LAPS) {
       registerFinish(bot);
     }
+  });
+}
+
+function applyDamageToPlayer(amount, reason = 'Heavy impact.') {
+  if (state.activeEffects.shield > 0) {
+    showToast('Shield absorbed damage.');
+    return;
+  }
+  state.arenaPlayerHp = Math.max(0, state.arenaPlayerHp - amount);
+  damageCar(amount * 0.6, reason);
+  if (state.arenaPlayerHp <= 0) {
+    state.arenaWinner = 'bots';
+    state.arenaActive = false;
+    showToast('You were eliminated.', 'bad');
+    applyPenalty(30, 'Eliminated in combat mode.', 0.8);
+  }
+}
+
+function applyDamageToBot(bot, amount) {
+  if (!bot || bot.alive === false) {
+    return;
+  }
+  bot.hp = Math.max(0, (bot.hp || 100) - amount);
+  if (bot.hp <= 0) {
+    bot.alive = false;
+    bot.speed = 0;
+    bot.mesh.group.visible = false;
+    awardXp(45, 'Bot eliminated');
+    state.arenaBotsAlive = Math.max(0, state.arenaBotsAlive - 1);
+    if (state.gameMode === 'elimination' && state.arenaBotsAlive <= 0 && state.arenaPlayerHp > 0) {
+      state.arenaWinner = 'player';
+      state.arenaActive = false;
+      showToast('Elimination victory! You are last alive.');
+      awardXp(120, 'Elimination Win');
+      updateProgressMetric('raceWins', 1);
+      unlockAchievement('last-stand', 'Last Stand');
+    }
+  }
+}
+
+function updateArenaPowerups(dt) {
+  if (!state.arenaActive) {
+    return;
+  }
+  arenaPowerupObjects.forEach((powerup, index) => {
+    if (!powerup.active) {
+      if (elapsedTime >= powerup.respawnAt) {
+        powerup.active = true;
+        powerup.mesh.visible = true;
+      }
+      return;
+    }
+    powerup.mesh.rotation.y += dt * 1.25;
+    const x = powerup.mesh.position.x;
+    const z = powerup.mesh.position.z;
+    powerup.mesh.position.y =
+      terrainHeightAt(x, z) +
+      2.7 +
+      Math.sin(elapsedTime * 2.2 + powerup.bobOffset + index * 0.1) * 0.22;
+    if (distanceXZ(powerup.mesh.position, player.position) < 4.4) {
+      powerup.active = false;
+      powerup.mesh.visible = false;
+      powerup.respawnAt = elapsedTime + 10 + noise2D(index, elapsedTime, 70) * 8;
+      state.powerupInventory[powerup.kind] = clamp((state.powerupInventory[powerup.kind] || 0) + 1, 0, 4);
+      showToast(`Picked up ${powerupDefinitions[powerup.kind].name}. Press ${powerupDefinitions[powerup.kind].key}.`);
+      awardXp(12, 'Power-up');
+      markUiDirty();
+    }
+  });
+}
+
+function updateArenaOilSpills() {
+  for (let index = oilSpillObjects.length - 1; index >= 0; index -= 1) {
+    const spill = oilSpillObjects[index];
+    if (elapsedTime >= spill.expiresAt) {
+      scene.remove(spill.mesh);
+      oilSpillObjects.splice(index, 1);
+      continue;
+    }
+    trackBots.forEach((bot) => {
+      if (bot.alive !== false && distanceXZ(bot.position, spill.position) < 3.3) {
+        bot.heading += (Math.random() - 0.5) * 1.4;
+        bot.speed *= 0.65;
+      }
+    });
+    if (distanceXZ(player.position, spill.position) < 2.9 && state.activeEffects.shield <= 0) {
+      player.heading += (Math.random() - 0.5) * 1.2;
+      player.speed *= 0.7;
+    }
+  }
+}
+
+function updateArenaBots(dt) {
+  if (!state.arenaActive) {
+    return;
+  }
+  let aliveCount = 0;
+  trackBots.forEach((bot) => {
+    if (bot.alive === false) {
+      return;
+    }
+    aliveCount += 1;
+    const target = state.gameMode === 'battle' || state.gameMode === 'elimination' ? player.position : trackRoute[bot.routeIndex];
+    const desiredHeading = headingFromPoints(bot.position, target);
+    bot.steerAngle = moveTowards(bot.steerAngle, normalizeAngle(desiredHeading - bot.heading), dt * 3.1);
+    bot.heading = moveAngleTowards(bot.heading, desiredHeading, bot.turnRate * dt * 1.15);
+    const desiredSpeed = state.activeEffects.emp > 0 ? bot.maxSpeed * 0.45 : bot.maxSpeed * 0.9;
+    bot.speed = moveTowards(bot.speed, desiredSpeed, bot.acceleration * dt);
+    moveBodyWithCollisions(
+      bot.position,
+      Math.cos(bot.heading) * bot.speed * dt,
+      Math.sin(bot.heading) * bot.speed * dt,
+      2.25,
+    );
+    const distToPlayer = distanceXZ(bot.position, player.position);
+    if (distToPlayer < 4.6 && state.mode === 'driving') {
+      applyDamageToPlayer(10, 'Arena collision hit you.');
+      applyDamageToBot(bot, 7 + Math.abs(player.speed) * 0.1);
+      player.speed *= 0.78;
+      bot.speed *= 0.72;
+    }
+  });
+  state.arenaBotsAlive = aliveCount;
+  if (state.gameMode === 'battle' && aliveCount === 0 && state.arenaPlayerHp > 0) {
+    state.arenaWinner = 'player';
+    state.arenaActive = false;
+    showToast('Battle Arena cleared. You win.');
+    awardXp(140, 'Battle Win');
+    unlockAchievement('arena-clear', 'Arena Champion');
+  }
+}
+
+function updatePoliceCopMode(dt) {
+  if (state.gameMode !== 'police' || state.policeChaseRole !== 'cop') {
+    return;
+  }
+  let aliveRunners = 0;
+  trackBots.forEach((runner) => {
+    if (runner.alive === false) {
+      return;
+    }
+    aliveRunners += 1;
+    const fleeTarget = runner.position
+      .clone()
+      .add(
+        new THREE.Vector3(
+          Math.cos(headingFromPoints(player.position, runner.position)) * 22,
+          0,
+          Math.sin(headingFromPoints(player.position, runner.position)) * 22,
+        ),
+      );
+    const desiredHeading = headingFromPoints(runner.position, fleeTarget);
+    runner.heading = moveAngleTowards(runner.heading, desiredHeading, runner.turnRate * dt * 1.1);
+    runner.speed = moveTowards(runner.speed, runner.maxSpeed * 0.95, runner.acceleration * dt);
+    moveBodyWithCollisions(
+      runner.position,
+      Math.cos(runner.heading) * runner.speed * dt,
+      Math.sin(runner.heading) * runner.speed * dt,
+      2.2,
+    );
+    if (distanceXZ(runner.position, player.position) < 3.8 && state.mode === 'driving') {
+      applyDamageToBot(runner, 28);
+      runner.speed *= 0.5;
+    }
+  });
+  if (aliveRunners === 0) {
+    showToast('All runners arrested. Cop victory!');
+    awardXp(150, 'Police Victory');
+    unlockAchievement('city-enforcer', 'City Enforcer');
+    setGameMode('free');
+  }
+}
+
+function updateGhostSystem() {
+  if (state.gameMode !== 'time-trial' || !state.trackRaceActive) {
+    ghostVehicle.mesh.group.visible = false;
+    return;
+  }
+  state.currentLapTime = elapsedTime - state.lapStartTime;
+  if (state.ghostEnabled) {
+    state.ghostRecording.push({
+      x: player.position.x,
+      z: player.position.z,
+      heading: player.heading,
+      speed: player.speed,
+    });
+    if (state.ghostRecording.length > 10000) {
+      state.ghostRecording.shift();
+    }
+  }
+  if (ghostVehicle.playback && ghostVehicle.playback.length > 1) {
+    ghostVehicle.mesh.group.visible = true;
+    ghostVehicle.frameIndex = (ghostVehicle.frameIndex + 1) % ghostVehicle.playback.length;
+    const frame = ghostVehicle.playback[ghostVehicle.frameIndex];
+    ghostVehicle.position.set(frame.x, 0, frame.z);
+    ghostVehicle.heading = frame.heading;
+    ghostVehicle.speed = frame.speed;
+  } else {
+    ghostVehicle.mesh.group.visible = false;
+  }
+}
+
+function updateControlChaos(dt) {
+  if (!state.controlChaosEnabled) {
+    return;
+  }
+  state.controlChaosTimer -= dt;
+  if (state.controlChaosTimer > 0) {
+    return;
+  }
+  state.controlChaosTimer = 30;
+  const effects = ['reverseSteer', 'lowGravity', 'superSpeed'];
+  const effect = effects[Math.floor(noise2D(elapsedTime, state.dayTime, 201) * effects.length)];
+  state.controlChaosEffect = effect;
+  state.activeEffects[effect] = 12;
+  showToast(
+    effect === 'reverseSteer'
+      ? 'Control Chaos: Reverse steering!'
+      : effect === 'lowGravity'
+        ? 'Control Chaos: Low gravity active!'
+        : 'Control Chaos: Super speed burst!',
+    'bad',
+  );
+}
+
+function decayActiveEffects(dt) {
+  Object.keys(state.activeEffects).forEach((effectKey) => {
+    state.activeEffects[effectKey] = Math.max(0, state.activeEffects[effectKey] - dt);
   });
 }
 
@@ -3634,6 +4729,13 @@ function updatePoliceEscalation() {
 
 function updateWorldAtmosphere(dt) {
   state.dayTime = (state.dayTime + dt * 0.18) % 24;
+  const activeMap = mapPresets.find((map) => map.id === state.currentMap) || mapPresets[0];
+  if (activeMap.id === 'snow') {
+    state.weather = 'fog';
+  }
+  if (activeMap.id === 'desert' && state.weather === 'fog') {
+    state.weather = 'clear';
+  }
   const daylight = clamp(Math.sin(((state.dayTime - 6) / 12) * Math.PI), 0, 1);
   const weatherFogBoost = state.weather === 'fog' ? 0.55 : state.weather === 'rain' ? 0.25 : 0;
 
@@ -3655,7 +4757,7 @@ function updateWorldAtmosphere(dt) {
   }
 
   state.weatherTimer -= dt;
-  if (state.weatherTimer <= 0) {
+  if (state.weatherTimer <= 0 && activeMap.id !== 'snow') {
     const nextWeather = ['clear', 'rain', 'fog'][Math.floor(noise2D(elapsedTime, state.dayTime, 91) * 3)];
     if (nextWeather !== state.weather) {
       state.weather = nextWeather;
@@ -3666,7 +4768,7 @@ function updateWorldAtmosphere(dt) {
   }
   state.weatherGripFactor = state.weather === 'rain' ? 0.82 : state.weather === 'fog' ? 0.92 : 1;
   state.trafficDensity = clamp(
-    0.5 + daylight * 0.9 - (state.weather === 'rain' ? 0.16 : 0),
+    0.5 + daylight * 0.9 - (state.weather === 'rain' ? 0.16 : 0) - (activeMap.id === 'snow' ? 0.12 : 0),
     0.35,
     1,
   );
@@ -3766,6 +4868,40 @@ function updateVehicleTransform(vehicle, dt = 1 / 60) {
     const spinAxis = wheel.userData.spinAxis || 'x';
     wheel.rotation[spinAxis] += wheel.userData.spinAngle;
   });
+  if (vehicle === player) {
+    const dentFactor = clamp((100 - state.carCondition) / 100, 0, 0.28);
+    if (vehicle.mesh.bodyMesh) {
+      vehicle.mesh.bodyMesh.scale.set(1 - dentFactor * 0.16, 1 - dentFactor * 0.1, 1 - dentFactor * 0.09);
+      vehicle.mesh.bodyMesh.position.y = 0.69 - dentFactor * 0.06;
+    }
+    if (vehicle.mesh.hoodMesh) {
+      vehicle.mesh.hoodMesh.rotation.x = -0.11 - dentFactor * 0.2;
+    }
+    if (vehicle.mesh.roofMesh) {
+      vehicle.mesh.roofMesh.scale.y = 1 - dentFactor * 0.2;
+    }
+    const shieldPulse = state.activeEffects.shield > 0
+      ? 0.12 + Math.abs(Math.sin(elapsedTime * 10)) * 0.2
+      : 0;
+    [vehicle.mesh.bodyMesh, vehicle.mesh.hoodMesh, vehicle.mesh.roofMesh].forEach((part) => {
+      if (part && part.material && part.material.emissive !== undefined) {
+        part.material.emissive.setHex(0x4cc9f0);
+        part.material.emissiveIntensity = shieldPulse;
+      }
+    });
+  }
+  const daylight = clamp(Math.sin(((state.dayTime - 6) / 12) * Math.PI), 0, 1);
+  const headlightIntensity = 0.3 + (1 - daylight) * 1.35;
+  vehicle.mesh.headlightMeshes?.forEach((headlight) => {
+    if (headlight?.material) {
+      headlight.material.emissiveIntensity = headlightIntensity;
+    }
+  });
+  vehicle.mesh.taillightMeshes?.forEach((taillight) => {
+    if (taillight?.material) {
+      taillight.material.emissiveIntensity = Math.abs(vehicle.speed) < 1.5 ? 0.65 : 0.48;
+    }
+  });
   if (vehicle.mesh.group.userData.flashBeacons) {
     vehicle.mesh.group.userData.flashBeacons(Math.sin(elapsedTime * 9) > 0);
   } else if (vehicle.mesh.sirens.length > 0) {
@@ -3809,8 +4945,14 @@ function updateDriving(dt) {
   const onPaved = isPaved(player.position.x, player.position.z);
   const onTrack = isOnRaceTrack(player.position.x, player.position.z);
   const forwardInput = locked ? 0 : Number(keys.forward) - Number(keys.back) * 0.7;
-  const steerInput = locked ? 0 : Number(keys.right) - Number(keys.left);
-  const boostPressed = !locked && keys.boost && forwardInput > 0.3 && state.nitroCharge > 1;
+  const steerControlSign = state.activeEffects.reverseSteer > 0 ? -1 : 1;
+  const steerInput = locked ? 0 : (Number(keys.right) - Number(keys.left)) * steerControlSign;
+  const boostPressed =
+    !locked &&
+    keys.boost &&
+    forwardInput > 0.3 &&
+    state.nitroCharge > 1 &&
+    state.nitroCooldown <= 0;
 
   applyPlayerCarTuning();
   if (state.tireDamageTimer > 0) {
@@ -3829,7 +4971,8 @@ function updateDriving(dt) {
     const gripFactor =
       (0.86 + state.tireGripLevel * 0.06 + state.suspensionLevel * 0.04) *
       (state.weatherGripFactor || 1) *
-      (state.tireDamageTimer > 0 ? 0.74 : 1);
+      (state.tireDamageTimer > 0 ? 0.74 : 1) *
+      (state.activeEffects.lowGravity > 0 ? 0.8 : 1);
     const steerStrength = clamp(Math.abs(player.speed) / 10, 0.18, 0.96) * gripFactor;
     player.heading += player.steerAngle * player.turnRate * dt * steerStrength * (player.speed >= 0 ? 1 : -1);
   }
@@ -3845,8 +4988,18 @@ function updateDriving(dt) {
     const boostPower = 14 + state.turboLevel * 3.8;
     player.speed += boostPower * dt;
     state.nitroCharge = Math.max(0, state.nitroCharge - (18 + state.turboLevel * 2.6) * dt);
+    if (state.nitroCharge <= 0.01) {
+      state.nitroCooldown = 2.6;
+    }
+  } else if (state.activeEffects.speedBoost > 0) {
+    player.speed += (10 + state.turboLevel * 2.2) * dt;
+    state.nitroCooldown = Math.max(state.nitroCooldown, 0.6);
   } else {
-    state.nitroCharge = Math.min(100, state.nitroCharge + (4.8 + state.turboLevel) * dt);
+    if (state.nitroCooldown > 0) {
+      state.nitroCooldown = Math.max(0, state.nitroCooldown - dt);
+    } else {
+      state.nitroCharge = Math.min(100, state.nitroCharge + (2.2 + state.turboLevel * 0.6) * dt);
+    }
   }
   if (keys.brake) {
     player.speed = moveTowards(player.speed, 0, 26 * dt);
@@ -3857,11 +5010,57 @@ function updateDriving(dt) {
 
   const boostedMaxSpeed = onPaved ? player.maxSpeed + (state.boostActive ? 9 + state.turboLevel * 4 : 0) : 16;
   player.speed = clamp(player.speed, -player.reverseSpeed, boostedMaxSpeed);
+  const drifting =
+    onPaved &&
+    Math.abs(player.speed) > 14 &&
+    Math.abs(player.steerAngle) > 0.22 &&
+    Math.abs(forwardInput) > 0.15;
+  if (drifting) {
+    const driftGain = Math.abs(player.speed) * dt * 0.85;
+    state.driftDistance += driftGain;
+    updateProgressMetric('driftMeters', driftGain);
+    if (state.nitroCooldown <= 0) {
+      state.nitroCharge = Math.min(100, state.nitroCharge + dt * (8 + state.tireGripLevel * 1.5));
+    }
+    if (elapsedTime - state.lastDriftToastAt > 8 && state.driftDistance > 180) {
+      state.lastDriftToastAt = elapsedTime;
+      showToast('Nice drift. Nitro refilled from tire slip.');
+    }
+  }
+
+  if (driftSmokeParticles.length < 80 && drifting) {
+    const smoke = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18 + Math.random() * 0.16, 7, 7),
+      new THREE.MeshBasicMaterial({
+        color: Number.parseInt((state.smokeColor || '#d7e3fc').replace('#', '0x'), 16) || 0xd7e3fc,
+        transparent: true,
+        opacity: 0.5,
+      }),
+    );
+    const offsetX = (Math.random() - 0.5) * 1.8;
+    const offsetZ = (Math.random() - 0.5) * 1.8;
+    smoke.position.set(
+      player.position.x - Math.cos(player.heading) * 1.6 + offsetX,
+      terrainHeightAt(player.position.x, player.position.z) + 0.34,
+      player.position.z - Math.sin(player.heading) * 1.6 + offsetZ,
+    );
+    smoke.userData.life = 0.9 + Math.random() * 0.5;
+    smoke.userData.vx = (Math.random() - 0.5) * 0.7;
+    smoke.userData.vz = (Math.random() - 0.5) * 0.7;
+    smoke.userData.vy = 0.22 + Math.random() * 0.2;
+    scene.add(smoke);
+    driftSmokeParticles.push(smoke);
+  }
+
   const deltaX = Math.cos(player.heading) * player.speed * dt;
   const deltaZ = Math.sin(player.heading) * player.speed * dt;
   const collided = moveBodyWithCollisions(player.position, deltaX, deltaZ, 2.3);
   if (collided && Math.abs(player.speed) > 5 && elapsedTime - state.lastConditionHitTime > 0.6) {
-    damageCar(7 + Math.abs(player.speed) * 0.28, 'You hit something solid.');
+    const crashAmount = 7 + Math.abs(player.speed) * 0.3;
+    damageCar(crashAmount, 'You hit something solid.');
+    applyDamageToPlayer(clamp(crashAmount * 0.45, 4, 26), 'Crash impact reduced control.');
+    player.heading += (Math.random() - 0.5) * 0.45;
+    state.tireDamageTimer = Math.max(state.tireDamageTimer, 3.5);
     player.speed *= 0.55;
   }
 
@@ -3885,6 +5084,9 @@ function updateDriving(dt) {
     }
   } else {
     state.speedingTimer = moveTowards(state.speedingTimer, 0, dt * 2);
+    if (state.gameMode === 'free' && state.wantedLevel === 0 && onPaved) {
+      updateProgressMetric('lawfulSeconds', dt);
+    }
   }
 
   if (!onPaved && Math.abs(player.speed) > 8) {
@@ -3985,6 +5187,22 @@ function updatePickups(dt) {
   });
 }
 
+function updateDriftSmoke(dt) {
+  for (let index = driftSmokeParticles.length - 1; index >= 0; index -= 1) {
+    const smoke = driftSmokeParticles[index];
+    smoke.userData.life -= dt;
+    smoke.position.x += smoke.userData.vx * dt;
+    smoke.position.z += smoke.userData.vz * dt;
+    smoke.position.y += smoke.userData.vy * dt;
+    smoke.scale.multiplyScalar(1 + dt * 1.3);
+    smoke.material.opacity = Math.max(0, smoke.userData.life * 0.58);
+    if (smoke.userData.life <= 0) {
+      scene.remove(smoke);
+      driftSmokeParticles.splice(index, 1);
+    }
+  }
+}
+
 function updateInteractionTarget() {
   if (state.inInterior && state.interiorPlaceId) {
     if (state.interactionId !== state.interiorPlaceId) {
@@ -4059,13 +5277,23 @@ function getInteractionHint() {
   }
   if (!state.interactionId) {
     const lookHint = state.pointerLocked ? 'Mouse look active.' : 'Click the game to lock the camera.';
+    const modeHint =
+      state.gameMode === 'battle' || state.gameMode === 'elimination'
+        ? ' Use powerups with keys 1-4.'
+        : state.gameMode === 'time-trial'
+          ? ' Beat your ghost lap time.'
+          : state.gameMode === 'police'
+            ? state.policeChaseRole === 'cop'
+              ? ' Ram runners to arrest them.'
+              : ' Outrun the cops to survive.'
+            : '';
     const jobHint =
       !state.currentJobId && state.mode === 'walking'
         ? ' Jobs: Corner Cafe, Parcel Point, Tech Hub.'
         : '';
     return state.mode === 'driving'
-      ? `${lookHint} W/S drive, A/D steer, Shift brakes, F boosts, Space exits.`
-      : `${lookHint} WASD moves, E interacts, Space enters car.${jobHint}`;
+      ? `${lookHint} W/S drive, A/D steer, Shift brakes, F boosts, Space exits.${modeHint}`
+      : `${lookHint} WASD moves, E interacts, Space enters car.${jobHint}${modeHint}`;
   }
   const place = placeById.get(state.interactionId);
   if (!place) {
@@ -4182,6 +5410,8 @@ function renderHud() {
       ? `${Math.min(state.missionProgress, activeMission.amount)}/${activeMission.amount}`
       : `${Math.min(state.missionProgress, activeMission.duration).toFixed(1)}s`
     : 'None';
+  const modeLabel = gameModes.find((mode) => mode.id === state.gameMode)?.name || 'City Free Roam';
+  const xpTarget = levelXpRequirement(state.level);
   const bonusPercent = state.trackRaceActive
     ? state.lawfulPayout
     : Math.min(100, (state.cityBonusTimer / CITY_BONUS_INTERVAL) * 100);
@@ -4207,8 +5437,11 @@ function renderHud() {
     <div class="stat-card">
       <div class="stat-line"><span>Money</span><strong>${formatMoney(state.money)}</strong></div>
       <div class="stat-line"><span>Mode</span><strong>${state.mode === 'driving' ? 'Driving' : 'Walking'}</strong></div>
+      <div class="stat-line"><span>Game</span><strong>${modeLabel}</strong></div>
       <div class="stat-line"><span>GPS</span><strong>${getTargetLabel()}</strong></div>
       <div class="stat-line"><span>FPS</span><strong>${Math.round(state.fps)}</strong></div>
+      <div class="stat-line"><span>Level</span><strong>${state.level}</strong></div>
+      <div class="stat-line"><span>XP</span><strong>${Math.round(state.xp)}/${Math.round(xpTarget)}</strong></div>
       <div class="stat-line"><span>Distance</span><strong>${gpsTarget ? `${gpsDistance}m` : '--'}</strong></div>
     </div>
     <div class="stat-card">
@@ -4237,9 +5470,14 @@ function renderHud() {
     <div class="stat-card">
       <div class="stat-line"><span>${state.trackRaceActive ? 'Track' : 'City'}</span><strong>${state.trackRaceActive ? `${Math.min(player.laps + 1, TOTAL_LAPS)}/${TOTAL_LAPS}` : stoplightState.label}</strong></div>
       <div class="stat-line"><span>Cargo</span><strong>${state.backpack.length}/${state.backpackCapacity}</strong></div>
+      <div class="stat-line"><span>Class</span><strong>${getCarClassForProfile().label}</strong></div>
+      <div class="stat-line"><span>HP</span><strong>${Math.round(state.arenaPlayerHp)}</strong></div>
       <div class="stat-line"><span>Mission</span><strong>${activeMission ? activeMission.title : 'None'}</strong></div>
       <div class="stat-line"><span>Progress</span><strong>${activeMissionProgress}</strong></div>
+      <div class="stat-line"><span>Lap Time</span><strong>${state.gameMode === 'time-trial' ? `${state.currentLapTime.toFixed(2)}s` : '--'}</strong></div>
+      <div class="stat-line"><span>Best Ghost</span><strong>${state.bestLapTime ? `${state.bestLapTime.toFixed(2)}s` : '--'}</strong></div>
       <div class="stat-line"><span>Weather</span><strong>${state.weather}</strong></div>
+      <div class="stat-line"><span>Powerups</span><strong>1:${state.powerupInventory.speed} 2:${state.powerupInventory.emp} 3:${state.powerupInventory.oil} 4:${state.powerupInventory.shield}</strong></div>
       <div class="stat-line"><span>Hint</span><strong>${getInteractionHint()}</strong></div>
       <div class="leaderboard">${leaderboardMarkup}</div>
     </div>
@@ -4277,6 +5515,21 @@ function handleCenterPanelAction(action, dataset) {
     handlePremiumStoreAction(dataset.item);
     return;
   }
+  if (action === 'set-mode') {
+    setGameMode(dataset.mode, { policeRole: state.policeChaseRole });
+    return;
+  }
+  if (action === 'set-police-role') {
+    state.policeChaseRole = dataset.role === 'cop' ? 'cop' : 'runner';
+    renderCenterPanel();
+    markUiDirty();
+    return;
+  }
+  if (action === 'set-map') {
+    switchMap(dataset.map);
+    renderCenterPanel();
+    return;
+  }
   if (action === 'stripe-open') {
     openStripeCheckout(dataset.link);
     return;
@@ -4291,6 +5544,49 @@ function handleCenterPanelAction(action, dataset) {
   }
   if (action === 'buy-car') {
     buyCarModel(dataset.car);
+    return;
+  }
+  if (action === 'upgrade-spoiler') {
+    if (state.spoilerLevel >= 3) {
+      showToast('Spoiler already maxed.', 'bad');
+      return;
+    }
+    const cost = 85 + state.spoilerLevel * 60;
+    buyUpgrade(
+      cost,
+      () => {
+        state.spoilerLevel += 1;
+        updatePlayerCosmetics();
+      },
+      () => `Spoiler upgraded to level ${state.spoilerLevel}.`,
+    );
+    return;
+  }
+  if (action === 'upgrade-bodykit') {
+    if (state.bodyKitLevel >= 3) {
+      showToast('Body kit already maxed.', 'bad');
+      return;
+    }
+    const cost = 90 + state.bodyKitLevel * 65;
+    buyUpgrade(
+      cost,
+      () => {
+        state.bodyKitLevel += 1;
+        updatePlayerCosmetics();
+      },
+      () => `Body kit upgraded to level ${state.bodyKitLevel}.`,
+    );
+    return;
+  }
+  if (action === 'choose-class') {
+    if (!carClassConfig[dataset.class]) {
+      return;
+    }
+    state.selectedCarClass = dataset.class;
+    applyPlayerCarTuning();
+    renderCenterPanel();
+    showToast(`Car class switched to ${carClassConfig[dataset.class].label}.`);
+    markUiDirty();
     return;
   }
   if (action === 'release-jail') {
@@ -4370,6 +5666,10 @@ function handlePhoneAction(action, dataset) {
     teleportHome();
     return;
   }
+  if (action === 'open-modes') {
+    openCenterPanel('game-modes');
+    return;
+  }
   if (action === 'open-missions') {
     openCenterPanel('missions');
     return;
@@ -4388,6 +5688,8 @@ function handleAction(action) {
     togglePhone();
   } else if (action === 'settings') {
     openCenterPanel('settings');
+  } else if (action === 'modes') {
+    openCenterPanel('game-modes');
   } else if (action === 'missions') {
     openCenterPanel('missions');
   } else if (action === 'store') {
@@ -4395,7 +5697,11 @@ function handleAction(action) {
   } else if (action === 'account') {
     openCenterPanel('account');
   } else if (action === 'track') {
-    teleportToTrack();
+    if (state.gameMode !== 'race') {
+      setGameMode('race');
+    } else {
+      teleportToTrack();
+    }
   } else if (action === 'interact') {
     performInteraction();
   } else if (action === 'bag' || action === 'backpack') {
@@ -4404,6 +5710,14 @@ function handleAction(action) {
     performReset();
   } else if (action === 'space') {
     toggleEnterExitCar();
+  } else if (action === 'power-speed') {
+    usePowerup('speed');
+  } else if (action === 'power-emp') {
+    usePowerup('emp');
+  } else if (action === 'power-oil') {
+    usePowerup('oil');
+  } else if (action === 'power-shield') {
+    usePowerup('shield');
   }
 }
 
@@ -4466,9 +5780,19 @@ function setupInput() {
     if (key === 'e') performInteraction();
     if (key === 'b') toggleBackpack();
     if (key === 'p') togglePhone();
+    if (key === 'g') openCenterPanel('game-modes');
     if (key === 'm') openCenterPanel('missions');
     if (key === 'o') openCenterPanel('premium-store');
     if (key === 'u') openCenterPanel('account');
+    if (key === '1') usePowerup('speed');
+    if (key === '2') usePowerup('emp');
+    if (key === '3') usePowerup('oil');
+    if (key === '4') usePowerup('shield');
+    if (key === 'c') {
+      state.controlChaosEnabled = !state.controlChaosEnabled;
+      showToast(`Control Chaos ${state.controlChaosEnabled ? 'enabled' : 'disabled'}.`);
+      markUiDirty();
+    }
     if (key === 't') teleportToTrack();
     if (key === 'r') performReset();
     if (key === 'n') {
@@ -4560,6 +5884,28 @@ function setupInput() {
       markUiDirty();
       return true;
     }
+    if (target.matches('input[type="checkbox"]') && key === 'controlChaosEnabled') {
+      state.controlChaosEnabled = target.checked;
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
+    if (target.matches('input[type="color"]')) {
+      if (key === 'paintColor') {
+        state.paintColor = target.value;
+        applyPlayerCarTuning();
+      } else if (key === 'neonColor') {
+        state.neonColor = target.value;
+      } else if (key === 'smokeColor') {
+        state.smokeColor = target.value;
+      } else {
+        return false;
+      }
+      updatePlayerCosmetics();
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
     return false;
   };
 
@@ -4600,10 +5946,13 @@ function setupLighting() {
 function populateWorld() {
   places.forEach((place) => createSpecialPlace(place));
   createInteriors();
+  createMapLandmarks();
   createPickups();
   ensureCityChunks(CITY_SPAWN);
   applyPlayerCarTuning();
+  updatePlayerCosmetics();
   loadInitialAccountState();
+  switchMap(state.currentMap || 'city', false);
   state.cameraYaw = player.heading;
   state.cameraPitch = 0.38;
   updateVehicleTransform(player, 1 / 60);
@@ -4633,6 +5982,8 @@ function animate() {
 
   ensureCityChunks(state.mode === 'driving' ? player.position : avatar.position);
   updateWorldAtmosphere(dt);
+  decayActiveEffects(dt);
+  updateControlChaos(dt);
   updateTrafficLights(dt);
   updateWanted(dt);
   updateDynamicHazards();
@@ -4654,13 +6005,34 @@ function animate() {
     trackBots.forEach((bot) => updateTrackBot(bot, dt));
   }
 
+  if (state.arenaActive) {
+    if (state.arenaCountdown > 0) {
+      state.arenaCountdown = Math.max(0, state.arenaCountdown - dt);
+      if (state.arenaCountdown > 0 && Math.floor(state.arenaCountdown * 2) % 2 === 0) {
+        state.missionMessage = `Arena starts in ${Math.ceil(state.arenaCountdown)}...`;
+      } else if (state.arenaCountdown === 0) {
+        state.missionMessage = 'Fight!';
+      }
+    } else {
+      updateArenaPowerups(dt);
+      updateArenaOilSpills();
+      updateArenaBots(dt);
+    }
+  }
+
+  updatePoliceCopMode(dt);
+  updateGhostSystem();
+
   updateTraffic(dt);
   updatePedestrians(dt);
   updatePolice(dt);
   updateMission(dt);
+  updateProgressionSystems(dt);
   updatePickups(dt);
+  updateDriftSmoke(dt);
   updateInteractionTarget();
   updateMarkers();
+  updatePlayerCosmetics();
 
   updateVehicleTransform(player, dt);
   updateVehicleTransform(policeCar, dt);
@@ -4670,6 +6042,9 @@ function animate() {
     }
   });
   trackBots.forEach((bot) => updateVehicleTransform(bot, dt));
+  if (ghostVehicle.mesh.group.visible) {
+    updateVehicleTransform(ghostVehicle, dt);
+  }
   updateAvatarTransform();
   updateCamera(dt);
   renderMinimap();

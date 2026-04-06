@@ -163,6 +163,7 @@ export function createCar(options = {}) {
   const headlightRight = headlightLeft.clone();
   headlightRight.position.x = 0.66;
   group.add(headlightRight);
+  const headlightMeshes = [headlightLeft, headlightRight];
 
   const taillightMat = new THREE.MeshStandardMaterial({
     color: 0x4f1012,
@@ -178,6 +179,7 @@ export function createCar(options = {}) {
   const tailRight = tailLeft.clone();
   tailRight.position.x = 0.68;
   group.add(tailRight);
+  const taillightMeshes = [tailLeft, tailRight];
 
   if (options.policeLightBar) {
     const bar = new THREE.Mesh(
@@ -207,8 +209,15 @@ export function createCar(options = {}) {
 
   group.userData = group.userData || {};
   group.userData.bodyMaterial = paintMaterial;
+  group.userData.trimMaterial = trimMaterial;
+  group.userData.bodyMesh = body;
+  group.userData.hoodMesh = hood;
+  group.userData.roofMesh = roof;
+  group.userData.chassisMesh = chassis;
   group.userData.wheels = wheelMeshes;
   group.userData.frontWheelPivots = frontWheelPivots;
+  group.userData.headlightMeshes = headlightMeshes;
+  group.userData.taillightMeshes = taillightMeshes;
   group.userData.setColor = (hex) => {
     paintMaterial.color.setHex(hex);
   };
