@@ -126,6 +126,9 @@ export function createCar(options = {}) {
     const wheelNode = new THREE.Group();
     wheelNode.userData.baseRotation = wheelNode.rotation.clone();
     wheelNode.userData.spinAxis = 'x';
+    wheelNode.userData.spinDirection = -1;
+    wheelNode.userData.spinAngle = 0;
+    wheelNode.userData.wheelRadius = 0.38;
 
     const tire = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.38, 0.32, 28), tireMat);
     tire.rotation.z = Math.PI / 2;

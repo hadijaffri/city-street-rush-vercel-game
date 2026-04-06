@@ -237,6 +237,27 @@ body,
   gap: 10px;
 }
 
+.settings-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-row {
+  display: grid;
+  gap: 6px;
+}
+
+.settings-row input[type="range"] {
+  width: 100%;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .action-card {
   padding: 10px 12px;
   border-radius: 16px;
@@ -346,4 +367,20 @@ body,
   .action-bar {
     display: none;
   }
+}
+
+body.force-mobile .touch-controls {
+  display: grid;
+}
+
+body.force-mobile .panel-left {
+  bottom: 168px;
+}
+
+body.force-mobile .action-bar {
+  display: none;
+}
+
+body.force-desktop .touch-controls {
+  display: none !important;
 }

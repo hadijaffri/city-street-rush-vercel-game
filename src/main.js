@@ -51,6 +51,11 @@ const toastEl = document.getElementById('toast');
 const touchControlsEl = document.getElementById('touch-controls');
 const actionBarEl = document.getElementById('action-bar');
 
+const savedDeviceMode = window.localStorage.getItem('csr_device_mode');
+const savedLookSensitivity = Number(window.localStorage.getItem('csr_look_sens') || '1');
+const savedSteerSensitivity = Number(window.localStorage.getItem('csr_steer_sens') || '1.25');
+const savedInvertLookY = window.localStorage.getItem('csr_invert_y') === '1';
+
 const CHUNK_SIZE = 240;
 const CHUNK_RANGE = 2;
 const ROAD_WIDTH = 22;
@@ -238,8 +243,14 @@ const state = {
   raceFinished: false,
   trackRaceActive: false,
   finishOrderCounter: 0,
+  lastCheckpointDistance: null,
+  lastCheckpointWarningTime: -10,
   currentJobId: null,
   lastJobTimes: {},
+  deviceMode: savedDeviceMode || null,
+  lookSensitivity: clamp(Number.isFinite(savedLookSensitivity) ? savedLookSensitivity : 1, 0.4, 2.5),
+  steeringSensitivity: clamp(Number.isFinite(savedSteerSensitivity) ? savedSteerSensitivity : 1, 0.6, 2),
+  invertLookY: savedInvertLookY,
   uiDirty: true,
   outOfGasToastShown: false,
   lastCollisionPenaltyTime: -10,
@@ -434,7 +445,7 @@ function resolveAxisMovement(position, radius, delta, axis) {
 
 function moveBodyWithCollisions(position, deltaX, deltaZ, radius) {
   const distance = Math.hypot(deltaX, deltaZ);
-  const stepCount = Math.max(1, Math.ceil(distance / Math.max(radius * 0.7, 0.22)));
+  const stepCount = Math.max(1, Math.ceil(distance / Math.max(radius * 0.22, 0.08)));
   const stepX = deltaX / stepCount;
   const stepZ = deltaZ / stepCount;
   let collided = false;
@@ -1012,6 +1023,13 @@ function createChunkRoads(group, chunkX, chunkZ) {
       return;
     }
     group.add(createBench(benchX, benchZ, rotationY));
+    const alignedWithX = Math.abs(Math.cos(rotationY)) > 0.5;
+    const halfW = alignedWithX ? 1.05 : 0.55;
+    const halfD = alignedWithX ? 0.55 : 1.05;
+    addBoxCollider(benchX - halfW, benchX + halfW, benchZ - halfD, benchZ + halfD, {
+      chunkKey,
+      damage: 2,
+    });
   });
 }
 
@@ -1417,10 +1435,32 @@ function getCarProfile() {
 function applyPlayerCarTuning() {
   const profile = getCarProfile();
   const conditionFactor = lerp(0.45, 1, state.carCondition / 100);
-  player.maxSpeed = (50 + profile.maxSpeedBonus + state.engineLevel * 7) * conditionFactor;
-  player.acceleration = 31 + profile.accelBonus + state.engineLevel * 5;
-  player.turnRate = 1.45 + state.handlingLevel * 0.16;
+  player.maxSpeed = (52 + profile.maxSpeedBonus + state.engineLevel * 7) * conditionFactor;
+  player.acceleration = 32 + profile.accelBonus + state.engineLevel * 5;
+  player.turnRate = (1.86 + state.handlingLevel * 0.24) * state.steeringSensitivity;
   player.mesh.bodyMaterial.color.setHex(profile.color);
+}
+
+function persistSettings() {
+  window.localStorage.setItem('csr_look_sens', String(state.lookSensitivity));
+  window.localStorage.setItem('csr_steer_sens', String(state.steeringSensitivity));
+  window.localStorage.setItem('csr_invert_y', state.invertLookY ? '1' : '0');
+}
+
+function applyDeviceMode(mode, announce = true) {
+  state.deviceMode = mode;
+  if (mode) {
+    window.localStorage.setItem('csr_device_mode', mode);
+  } else {
+    window.localStorage.removeItem('csr_device_mode');
+  }
+  document.body.classList.toggle('force-mobile', mode === 'mobile');
+  document.body.classList.toggle('force-desktop', mode === 'desktop');
+  if (announce) {
+    const label = mode ? mode[0].toUpperCase() + mode.slice(1) : 'Auto';
+    showToast(`Device mode set to ${label}.`);
+  }
+  markUiDirty();
 }
 
 function damageCar(amount, reason) {
@@ -1817,6 +1857,51 @@ function renderCenterPanel() {
     return;
   }
 
+  if (state.centerPanel === 'device-setup') {
+    centerPanelEl.innerHTML = `
+      <h2>Choose Device</h2>
+      <p class="mini">Pick your device so controls and UI are tuned correctly.</p>
+      <div class="action-list">
+        <button data-center-action="device-mode" data-mode="desktop">Desktop</button>
+        <button data-center-action="device-mode" data-mode="mobile">Mobile</button>
+        <button data-center-action="device-mode" data-mode="auto">Auto Detect</button>
+      </div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'settings') {
+    centerPanelEl.innerHTML = `
+      <h2>Settings</h2>
+      <div class="settings-grid">
+        <div class="settings-row">
+          <label><strong>Look Sensitivity</strong> <span class="mini">${state.lookSensitivity.toFixed(2)}x</span></label>
+          <input type="range" min="0.4" max="2.5" step="0.05" value="${state.lookSensitivity}" data-setting="lookSensitivity" />
+        </div>
+        <div class="settings-row">
+          <label><strong>Steering Sensitivity</strong> <span class="mini">${state.steeringSensitivity.toFixed(2)}x</span></label>
+          <input type="range" min="0.6" max="2.0" step="0.05" value="${state.steeringSensitivity}" data-setting="steeringSensitivity" />
+        </div>
+        <div class="switch-row">
+          <strong>Invert Look Y</strong>
+          <input type="checkbox" data-setting="invertLookY" ${state.invertLookY ? 'checked' : ''} />
+        </div>
+        <div class="action-card">
+          <strong>Controls</strong>
+          <div class="mini">Drive/Walk: WASD or Arrow Keys</div>
+          <div class="mini">Interact: E, Enter/Exit Car: Space</div>
+          <div class="mini">Phone: P, Backpack: B, Track: T</div>
+        </div>
+        <div class="action-list">
+          <button data-center-action="device-mode" data-mode="desktop">Use Desktop Controls</button>
+          <button data-center-action="device-mode" data-mode="mobile">Use Mobile Controls</button>
+          <button data-center-action="device-mode" data-mode="auto">Use Auto Detect</button>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
   if (state.centerPanel === 'jail-lock') {
     centerPanelEl.innerHTML = `
       <h2>Metro Jail</h2>
@@ -2079,7 +2164,22 @@ function onPlayerTrackLapComplete() {
 function updateTrackCheckpoint(vehicle, lapCallback) {
   const targetIndex = vehicle.routeIndex;
   const target = trackRoute[targetIndex];
-  if (distanceXZ(vehicle.position, target) <= 11) {
+  const distance = distanceXZ(vehicle.position, target);
+
+  if (vehicle === player && state.trackRaceActive) {
+    if (
+      state.lastCheckpointDistance !== null &&
+      state.lastCheckpointDistance < 24 &&
+      distance > 42 &&
+      elapsedTime - state.lastCheckpointWarningTime > 3
+    ) {
+      state.lastCheckpointWarningTime = elapsedTime;
+      showToast('Checkpoint missed. Turn back to the marker.', 'bad');
+    }
+    state.lastCheckpointDistance = distance;
+  }
+
+  if (distance <= 11) {
     vehicle.routeIndex = (vehicle.routeIndex + 1) % trackRoute.length;
     if (targetIndex === 0) {
       vehicle.laps += 1;
@@ -2119,6 +2219,8 @@ function resetTrackRace() {
   state.trackRaceActive = true;
   state.raceFinished = false;
   state.finishOrderCounter = 0;
+  state.lastCheckpointDistance = null;
+  state.lastCheckpointWarningTime = -10;
   state.lawfulPayout = 100;
   state.cityBonusTimer = 0;
   state.speedingTimer = 0;
@@ -2151,6 +2253,9 @@ function updateTrafficLights(dt) {
 }
 
 function updateWanted(dt) {
+  if (state.trackRaceActive) {
+    return;
+  }
   if (state.wantedTimer > 0) {
     state.wantedTimer -= dt;
   } else {
@@ -2239,14 +2344,15 @@ function updatePoliceCar(targetPosition, dt, targetSpeed) {
   const distanceToTarget = distanceXZ(policeCar.position, targetPosition);
   const lookAhead = clamp(distanceToTarget / 24, 0.12, 1.2);
   const interceptPoint = targetPosition.clone().addScaledVector(targetVelocity, lookAhead);
-  const desiredHeading = headingFromPoints(policeCar.position, interceptPoint);
+  const chasePoint = distanceToTarget < 14 ? targetPosition : interceptPoint;
+  const desiredHeading = headingFromPoints(policeCar.position, chasePoint);
   const headingDelta = normalizeAngle(desiredHeading - policeCar.heading);
 
-  policeCar.steerAngle = moveTowards(policeCar.steerAngle, headingDelta, dt * 3.9);
+  policeCar.steerAngle = moveTowards(policeCar.steerAngle, headingDelta, dt * 5.2);
   policeCar.heading = moveAngleTowards(
     policeCar.heading,
     desiredHeading,
-    policeCar.turnRate * dt * (distanceToTarget < 14 ? 2.15 : 1.4),
+    policeCar.turnRate * dt * (distanceToTarget < 14 ? 2.9 : 1.6),
   );
 
   const arriveFactor = clamp((distanceToTarget - 3.2) / 26, 0.16, 1);
@@ -2266,6 +2372,20 @@ function updatePoliceCar(targetPosition, dt, targetSpeed) {
   );
   if (collided) {
     policeCar.speed *= 0.52;
+  }
+
+  const previousDistance = policeCar._previousTargetDistance ?? distanceToTarget;
+  const madeProgress = previousDistance - distanceToTarget;
+  if (distanceToTarget > 10 && madeProgress < 0.06) {
+    policeCar._noProgressTimer = (policeCar._noProgressTimer || 0) + dt;
+  } else {
+    policeCar._noProgressTimer = moveTowards(policeCar._noProgressTimer || 0, 0, dt * 2);
+  }
+  policeCar._previousTargetDistance = distanceToTarget;
+  if ((policeCar._noProgressTimer || 0) > 2.4 && distanceToTarget > 18) {
+    deployPoliceCarNear(targetPosition);
+    policeCar._noProgressTimer = 0;
+    policeCar._previousTargetDistance = distanceXZ(policeCar.position, targetPosition);
   }
 }
 
@@ -2290,16 +2410,30 @@ function updateOfficer(officer, targetPosition, dt) {
 }
 
 function updatePolice(dt) {
-  if (state.wantedLevel <= 0 || state.trackRaceActive || state.jailTimer > 0) {
+  if (state.wantedLevel <= 0 || state.jailTimer > 0) {
     policeCar.mesh.group.visible = false;
     officers.forEach((officer) => {
       officer.active = false;
       officer.group.visible = false;
     });
+    policeCar._noProgressTimer = 0;
+    policeCar._previousTargetDistance = null;
     state.nextOfficerSpawnAt = 0;
     state.wantedStartTime = -999;
     state.policeVehiclePursuit = false;
     state.arrestMeter = moveTowards(state.arrestMeter, 0, dt * 3);
+    return;
+  }
+
+  if (state.trackRaceActive) {
+    policeCar.mesh.group.visible = false;
+    officers.forEach((officer) => {
+      officer.active = false;
+      officer.group.visible = false;
+    });
+    policeCar._noProgressTimer = 0;
+    policeCar._previousTargetDistance = null;
+    state.arrestMeter = moveTowards(state.arrestMeter, 0, dt * 2);
     return;
   }
 
@@ -2399,16 +2533,19 @@ function updateVehicleTransform(vehicle, dt = 1 / 60) {
     vehicle.position.z,
   );
   vehicle.mesh.group.rotation.y = -vehicle.heading + (vehicle.mesh.headingOffset || 0);
-  vehicle.wheelSpin += vehicle.speed * dt * 1.75;
   vehicle.mesh.frontWheelPivots.forEach((pivot) => {
     pivot.rotation.y = -clamp(vehicle.steerAngle, -0.6, 0.6);
   });
   vehicle.mesh.wheelMeshes.forEach((wheel) => {
+    const radius = wheel.userData.wheelRadius || 0.38;
+    const spinDirection = wheel.userData.spinDirection || -1;
+    wheel.userData.spinAngle =
+      (wheel.userData.spinAngle || 0) + (vehicle.speed * dt / Math.max(radius, 0.2)) * spinDirection;
     if (wheel.userData.baseRotation) {
       wheel.rotation.copy(wheel.userData.baseRotation);
     }
     const spinAxis = wheel.userData.spinAxis || 'x';
-    wheel.rotation[spinAxis] += vehicle.wheelSpin;
+    wheel.rotation[spinAxis] += wheel.userData.spinAngle;
   });
   if (vehicle.mesh.group.userData.flashBeacons) {
     vehicle.mesh.group.userData.flashBeacons(Math.sin(elapsedTime * 9) > 0);
@@ -2456,13 +2593,17 @@ function updateDriving(dt) {
   const steerInput = locked ? 0 : Number(keys.right) - Number(keys.left);
 
   applyPlayerCarTuning();
-  player.steerAngle = moveTowards(player.steerAngle, steerInput * 0.42, dt * 1.75);
+  player.steerAngle = moveTowards(
+    player.steerAngle,
+    steerInput * (0.72 * state.steeringSensitivity),
+    dt * (3.4 * state.steeringSensitivity),
+  );
   if (!state.pointerLocked) {
     state.cameraYaw = moveAngleTowards(state.cameraYaw, player.heading, dt * 2.4);
     state.cameraPitch = moveTowards(state.cameraPitch, 0.38, dt * 1.6);
   }
   if (Math.abs(player.speed) > 0.08) {
-    const steerStrength = clamp(Math.abs(player.speed) / 16, 0.08, 0.72);
+    const steerStrength = clamp(Math.abs(player.speed) / 10, 0.18, 0.96);
     player.heading += player.steerAngle * player.turnRate * dt * steerStrength * (player.speed >= 0 ? 1 : -1);
   }
 
@@ -2646,11 +2787,16 @@ function updateInteractionTarget() {
   if (
     state.centerPanel &&
     state.centerPanel !== 'jail-lock' &&
-    state.centerPanel !== nextInteraction &&
-    !(state.centerPanel === 'gas' && nextInteraction === 'gas')
+    state.centerPanel !== 'settings' &&
+    state.centerPanel !== 'device-setup' &&
+    placeById.has(state.centerPanel)
   ) {
-    state.centerPanel = null;
-    centerPanelEl.classList.add('hidden');
+    const panelPlace = placeById.get(state.centerPanel);
+    const panelPoint = panelPlace.entryPoint || panelPlace.position;
+    if (distanceXZ(reference, panelPoint) > panelPlace.radius + 14) {
+      state.centerPanel = null;
+      centerPanelEl.classList.add('hidden');
+    }
   }
 }
 
@@ -2877,6 +3023,20 @@ function handleCenterPanelAction(action, dataset) {
   }
   if (action === 'release-jail') {
     releaseFromJail();
+    return;
+  }
+  if (action === 'open-settings') {
+    openCenterPanel('settings');
+    return;
+  }
+  if (action === 'device-mode') {
+    applyDeviceMode(dataset.mode === 'auto' ? null : dataset.mode);
+    if (state.centerPanel === 'device-setup') {
+      closePanels();
+    } else {
+      renderCenterPanel();
+    }
+    return;
   }
 }
 
@@ -2901,6 +3061,8 @@ function handlePhoneAction(action, dataset) {
 function handleAction(action) {
   if (action === 'phone') {
     togglePhone();
+  } else if (action === 'settings') {
+    openCenterPanel('settings');
   } else if (action === 'track') {
     teleportToTrack();
   } else if (action === 'interact') {
@@ -2944,9 +3106,11 @@ function setupInput() {
     if (!state.pointerLocked) {
       return;
     }
-    state.cameraYaw = normalizeAngle(state.cameraYaw + event.movementX * 0.0035);
+    const lookSensitivity = state.lookSensitivity;
+    state.cameraYaw = normalizeAngle(state.cameraYaw + event.movementX * 0.0035 * lookSensitivity);
+    const verticalDelta = event.movementY * 0.0024 * lookSensitivity * (state.invertLookY ? 1 : -1);
     state.cameraPitch = clamp(
-      state.cameraPitch - event.movementY * 0.0024,
+      state.cameraPitch + verticalDelta,
       state.mode === 'driving' ? 0.2 : 0.22,
       state.mode === 'driving' ? 0.72 : 0.86,
     );
@@ -3030,7 +3194,48 @@ function setupInput() {
     const button = event.target.closest('button[data-center-action]');
     if (button) {
       handleCenterPanelAction(button.dataset.centerAction, button.dataset);
+      return;
     }
+  });
+
+  const applySettingsInput = (target) => {
+    const key = target?.dataset?.setting;
+    if (!key) {
+      return false;
+    }
+    if (target.matches('input[type="range"]')) {
+      const value = Number(target.value);
+      if (key === 'lookSensitivity') {
+        state.lookSensitivity = clamp(value, 0.4, 2.5);
+      } else if (key === 'steeringSensitivity') {
+        state.steeringSensitivity = clamp(value, 0.6, 2);
+      } else {
+        return false;
+      }
+      persistSettings();
+      applyPlayerCarTuning();
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
+    if (target.matches('input[type="checkbox"]') && key === 'invertLookY') {
+      state.invertLookY = target.checked;
+      persistSettings();
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
+    return false;
+  };
+
+  centerPanelEl.addEventListener('input', (event) => {
+    const input = event.target.closest('input[data-setting]');
+    applySettingsInput(input);
+  });
+
+  centerPanelEl.addEventListener('change', (event) => {
+    const input = event.target.closest('input[data-setting]');
+    applySettingsInput(input);
   });
 
   phonePanelEl.addEventListener('click', (event) => {
@@ -3069,6 +3274,10 @@ function populateWorld() {
   trackBots.forEach((bot) => updateVehicleTransform(bot, 1 / 60));
   updateAvatarTransform();
   updateMarkers();
+  applyDeviceMode(state.deviceMode, false);
+  if (!state.deviceMode) {
+    openCenterPanel('device-setup');
+  }
 }
 
 function handleResize() {
