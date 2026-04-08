@@ -201,6 +201,16 @@ body,
   display: none;
 }
 
+body.photo-mode .hud,
+body.photo-mode .panel,
+body.photo-mode .action-bar,
+body.photo-mode .touch-controls,
+body.photo-mode .touch-analog,
+body.photo-mode .minimap-wrap,
+body.photo-mode .toast {
+  display: none !important;
+}
+
 .controls {
   display: grid;
   gap: 6px;
@@ -362,6 +372,30 @@ body,
   border-color: rgba(246, 211, 101, 0.45);
 }
 
+.touch-analog {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 96px;
+  display: none;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(9, 18, 28, 0.82);
+  backdrop-filter: blur(10px);
+  z-index: 6;
+}
+
+.touch-analog input[type="range"] {
+  width: 100%;
+}
+
+.analog-throttle {
+  display: grid;
+  gap: 4px;
+}
+
 @media (max-width: 768px) {
   .panel-left {
     width: calc(100vw - 32px);
@@ -395,8 +429,12 @@ body,
     display: grid;
   }
 
+  .touch-analog {
+    display: grid;
+  }
+
   .panel-left {
-    bottom: 168px;
+    bottom: 250px;
   }
 
   .action-bar {
@@ -404,7 +442,7 @@ body,
   }
 
   .minimap-wrap {
-    bottom: 176px;
+    bottom: 268px;
   }
 }
 
@@ -413,7 +451,7 @@ body.force-mobile .touch-controls {
 }
 
 body.force-mobile .panel-left {
-  bottom: 168px;
+  bottom: 250px;
 }
 
 body.force-mobile .action-bar {
@@ -421,9 +459,17 @@ body.force-mobile .action-bar {
 }
 
 body.force-mobile .minimap-wrap {
-  bottom: 176px;
+  bottom: 268px;
+}
+
+body.force-mobile .touch-analog {
+  display: grid;
 }
 
 body.force-desktop .touch-controls {
+  display: none !important;
+}
+
+body.force-desktop .touch-analog {
   display: none !important;
 }

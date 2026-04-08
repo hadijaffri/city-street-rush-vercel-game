@@ -52,16 +52,32 @@ const touchControlsEl = document.getElementById('touch-controls');
 const actionBarEl = document.getElementById('action-bar');
 const minimapCanvas = document.getElementById('minimap');
 const minimapCtx = minimapCanvas ? minimapCanvas.getContext('2d') : null;
+const touchSteerEl = document.getElementById('touch-steer');
+const touchThrottleEl = document.getElementById('touch-throttle');
+const touchBrakeEl = document.getElementById('touch-brake');
 
 const savedDeviceMode = window.localStorage.getItem('csr_device_mode');
 const savedLookSensitivity = Number(window.localStorage.getItem('csr_look_sens') || '1');
 const savedSteerSensitivity = Number(window.localStorage.getItem('csr_steer_sens') || '1.25');
 const savedInvertLookY = window.localStorage.getItem('csr_invert_y') === '1';
+const savedAudioEnabled = window.localStorage.getItem('csr_audio_enabled');
+const savedAudioVolume = Number(window.localStorage.getItem('csr_audio_vol') || '0.62');
 
 const ACCOUNTS_STORAGE_KEY = 'csr_accounts_v1';
 const ACTIVE_ACCOUNT_STORAGE_KEY = 'csr_active_account_v1';
+const SEASON_STORAGE_KEY = 'csr_season_v1';
+const MULTIPLAYER_NAME_KEY = 'csr_mp_name_v1';
 const SAVE_VERSION = 3;
 const AUTOSAVE_INTERVAL = 12;
+const MULTIPLAYER_BROADCAST_HZ = 10;
+const REPLAY_MAX_FRAMES = 3000;
+const USED_MARKET_ROTATE_MS = 1000 * 60 * 60 * 24;
+const PARKING_SUCCESS_RADIUS = 4.4;
+const PARKING_STOP_SPEED = 1.2;
+const DYNAMIC_EVENT_RESPAWN_MIN = 36;
+const DYNAMIC_EVENT_RESPAWN_MAX = 64;
+const RIDESHARE_XP_THRESHOLDS = [0, 120, 360, 760, 1300, 2100];
+const RIDESHARE_TIER_LABELS = ['Starter', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond'];
 const stripeLinks = {
   creditsSmall: import.meta.env.VITE_STRIPE_CREDITS_SMALL || '',
   creditsLarge: import.meta.env.VITE_STRIPE_CREDITS_LARGE || '',
@@ -249,7 +265,6 @@ const carClassConfig = {
 const gameModes = [
   { id: 'free', name: 'City Free Roam', description: 'Open world driving with jobs, traffic, and police.' },
   { id: 'race', name: 'Race Mode', description: 'Classic lap racing with bots and checkpoints.' },
-  { id: 'battle', name: 'Battle Arena', description: 'Arena combat with power-ups and vehicle HP.' },
   { id: 'police', name: 'Police Chase Mode', description: 'Play as runner or cop in pursuit mode.' },
   { id: 'elimination', name: 'Elimination Mode', description: 'Last car with HP remaining wins.' },
   { id: 'time-trial', name: 'Time Trial Ghosts', description: 'Race your previous best ghost run.' },
@@ -341,6 +356,25 @@ let activeAccountId = window.localStorage.getItem(ACTIVE_ACCOUNT_STORAGE_KEY) ||
 if (!accountBook || typeof accountBook !== 'object' || Array.isArray(accountBook)) {
   accountBook = {};
 }
+let seasonalBook = safeReadJson(SEASON_STORAGE_KEY, null);
+
+const drivingSchoolLessons = [
+  { id: 'control', label: 'Smooth Control', target: 20 },
+  { id: 'lawful', label: 'Lawful Driving', target: 26 },
+  { id: 'parking', label: 'Precision Parking', target: 1 },
+];
+
+function getSeasonId(date = new Date()) {
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const diffDays = Math.floor((date - yearStart) / (1000 * 60 * 60 * 24));
+  const week = Math.floor(diffDays / 7) + 1;
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+
+function formatSeasonWeekLabel(seasonId) {
+  const [year, week] = seasonId.split('-W');
+  return `Season ${year} Week ${week}`;
+}
 
 const state = {
   mode: 'driving',
@@ -350,6 +384,60 @@ const state = {
   controlChaosEnabled: false,
   controlChaosTimer: 30,
   controlChaosEffect: null,
+  multiplayer: {
+    enabled: false,
+    roomCode: '',
+    playerId: `p-${Math.random().toString(36).slice(2, 10)}`,
+    playerName: window.localStorage.getItem(MULTIPLAYER_NAME_KEY) || 'Driver',
+    connectedAt: 0,
+    peers: {},
+    peerCount: 0,
+  },
+  multiplayerSendTimer: 0,
+  antiCheat: {
+    lastPlayerPos: null,
+    lastMoney: 180,
+    lastXp: 0,
+    lastValidHeading: 0,
+    moneyGraceTimer: 0,
+    teleportGraceFrames: 0,
+    warningCount: 0,
+    lastWarningAt: -999,
+  },
+  audio: {
+    enabled: savedAudioEnabled === null ? true : savedAudioEnabled === '1',
+    initialized: false,
+    masterVolume: Number.isFinite(savedAudioVolume) ? clamp(savedAudioVolume, 0, 1) : 0.62,
+  },
+  gamepad: {
+    connected: false,
+    steer: 0,
+    throttle: 0,
+    brake: 0,
+  },
+  touchAnalog: {
+    steer: 0,
+    throttle: 0,
+    brake: 0,
+  },
+  seasonal: {
+    seasonId: '',
+    weekLabel: '',
+    score: 0,
+    weeklyChallenge: {
+      targetLapTime: 74,
+      targetDrift: 1200,
+      targetCleanMinutes: 6,
+    },
+    progress: {
+      bestLapTime: null,
+      driftMeters: 0,
+      cleanMinutes: 0,
+    },
+    leaderboard: [],
+    timeTrialBoards: {},
+    activeTimeTrialBoard: [],
+  },
   powerupInventory: {
     speed: 0,
     emp: 0,
@@ -415,11 +503,28 @@ const state = {
   boostActive: false,
   tireDamageTimer: 0,
   carModelId: 'starter',
+  vehicleWear: {
+    engine: 100,
+    brakes: 100,
+    tires: 100,
+    mileage: 0,
+    lastServiceAt: 0,
+  },
+  usedMarket: {
+    dateKey: '',
+    updatedAt: 0,
+    listings: [],
+  },
   interactionId: null,
   centerPanel: null,
   phoneOpen: false,
   backpackOpen: false,
   gpsTargetId: null,
+  gpsRouteMode: 'fastest',
+  gpsRoutePoints: [],
+  gpsRouteIndex: 0,
+  gpsLastRecomputeAt: -999,
+  gpsLastTargetKey: '',
   wantedHeat: 0,
   wantedLevel: 0,
   wantedTimer: 0,
@@ -434,6 +539,42 @@ const state = {
   missionProgress: 0,
   missionsCompleted: 0,
   missionMessage: 'No mission active.',
+  rideshare: {
+    xp: 0,
+    tier: 0,
+    completed: 0,
+    online: true,
+    activeRide: null,
+    offers: [],
+    rerollTimer: 0,
+    stars: 5,
+  },
+  convoyJob: {
+    active: false,
+    route: [],
+    routeIndex: 0,
+    segmentTimer: 0,
+    segmentLimit: 32,
+    farTimer: 0,
+    payout: 0,
+    completedRuns: 0,
+  },
+  parkingChallenge: {
+    active: false,
+    spotId: null,
+    timer: 0,
+    maxTimer: 50,
+    completed: 0,
+  },
+  drivingSchool: {
+    active: false,
+    lessonIndex: 0,
+    progress: 0,
+    violations: 0,
+    licenseLevel: 0,
+    completedRuns: 0,
+    parkingBaseline: 0,
+  },
   lastCheckpointDistance: null,
   lastCheckpointWarningTime: -10,
   currentJobId: null,
@@ -461,6 +602,57 @@ const state = {
   bestLapTime: null,
   currentLapTime: 0,
   lapStartTime: 0,
+  replay: {
+    buffer: [],
+    active: false,
+    paused: false,
+    playback: [],
+    frameIndex: 0,
+    photoMode: false,
+  },
+  cruiseControl: {
+    enabled: false,
+    targetSpeed: 0,
+  },
+  assists: {
+    abs: true,
+    traction: true,
+    stability: true,
+  },
+  driveStyle: 'normal',
+  reputation: 0,
+  garages: {
+    owned: 0,
+    slots: 1,
+    storedCars: [],
+  },
+  dynamicEvent: {
+    active: false,
+    type: null,
+    label: '',
+    timer: 28,
+    center: null,
+    radius: 0,
+    payoutMultiplier: 1,
+    xpMultiplier: 1,
+    speedLimit: 0,
+    overspeedTimer: 0,
+    locationLabel: '',
+    marker: null,
+    shownHintAt: -999,
+  },
+  lawSignals: {
+    mode: 'off',
+    timer: 0,
+    lastHeading: 0,
+  },
+  onboarding: {
+    active: false,
+    completed: window.localStorage.getItem('csr_onboarding_done') === '1',
+    step: 0,
+    progress: 0,
+    ridesCompletedAtStart: 0,
+  },
   deviceMode: savedDeviceMode || null,
   lookSensitivity: clamp(Number.isFinite(savedLookSensitivity) ? savedLookSensitivity : 1, 0.4, 2.5),
   steeringSensitivity: clamp(Number.isFinite(savedSteerSensitivity) ? savedSteerSensitivity : 1, 0.6, 2),
@@ -529,6 +721,16 @@ const driftSmokeParticles = [];
 const arenaPowerupObjects = [];
 const oilSpillObjects = [];
 const mapLandmarks = [];
+const parkingSpots = [];
+const remotePlayers = new Map();
+
+let multiplayerChannel = null;
+let audioContext = null;
+let audioMasterGain = null;
+let engineOscillator = null;
+let engineGain = null;
+let sirenOscillator = null;
+let sirenGain = null;
 
 function getChunkIndex(value) {
   return Math.floor((value + CHUNK_SIZE / 2) / CHUNK_SIZE);
@@ -1879,6 +2081,36 @@ function createMapLandmarks() {
   });
 }
 
+function createParkingSpots() {
+  while (parkingSpots.length > 0) {
+    const spot = parkingSpots.pop();
+    if (spot.marker?.group) {
+      scene.remove(spot.marker.group);
+    }
+  }
+  const candidates = places.filter((place) => place.type !== 'track');
+  candidates.forEach((place, index) => {
+    const forward = place.entryOffset ? place.entryOffset.clone().normalize() : new THREE.Vector3(0, 0, 1);
+    const right = new THREE.Vector3(-forward.z, 0, forward.x);
+    const center = (place.entryPoint || place.position)
+      .clone()
+      .add(forward.clone().multiplyScalar(7.5 + (index % 2) * 2.2))
+      .add(right.multiplyScalar((index % 3) - 1.1));
+    const heading = Math.atan2(forward.z, forward.x);
+    const marker = createGlowMarker(0x6cf0ff, 2.4, 4.5);
+    marker.group.position.set(center.x, terrainHeightAt(center.x, center.z) + 0.2, center.z);
+    marker.group.visible = false;
+    parkingSpots.push({
+      id: `park-${place.id}`,
+      label: `${place.name} Lot`,
+      placeId: place.id,
+      position: center,
+      heading,
+      marker,
+    });
+  });
+}
+
 function createPickups() {
   pickupSpawns.forEach((spawn, index) => {
     const type = pickupCatalog[index % pickupCatalog.length];
@@ -1911,10 +2143,1441 @@ setTrafficLightPhase(0);
 function showToast(message, type = 'good') {
   toastEl.textContent = message;
   toastEl.className = `toast show ${type}`;
+  if (type === 'bad') {
+    playUiTone(220, 0.12, 'square', 0.12);
+  } else {
+    playUiTone(620, 0.08, 'triangle', 0.1);
+  }
   window.clearTimeout(toastTimeoutId);
   toastTimeoutId = window.setTimeout(() => {
     toastEl.className = 'toast';
   }, 2500);
+}
+
+function persistSeasonBook() {
+  window.localStorage.setItem(SEASON_STORAGE_KEY, JSON.stringify(seasonalBook || {}));
+}
+
+function ensureSeasonState() {
+  const seasonId = getSeasonId();
+  if (!seasonalBook || typeof seasonalBook !== 'object') {
+    seasonalBook = {};
+  }
+  if (!seasonalBook[seasonId]) {
+    seasonalBook[seasonId] = {
+      leaderboard: [],
+      timeTrialBoards: {},
+      updatedAt: Date.now(),
+    };
+    persistSeasonBook();
+  }
+  state.seasonal.seasonId = seasonId;
+  state.seasonal.weekLabel = formatSeasonWeekLabel(seasonId);
+  state.seasonal.leaderboard = seasonalBook[seasonId].leaderboard || [];
+  state.seasonal.timeTrialBoards = seasonalBook[seasonId].timeTrialBoards || {};
+  state.seasonal.activeTimeTrialBoard = getSeasonTimeTrialBoard(state.currentMap, state.selectedCarClass).slice(0, 8);
+}
+
+function persistSeasonLeaderboard() {
+  const seasonId = state.seasonal.seasonId || getSeasonId();
+  if (!seasonalBook[seasonId]) {
+    seasonalBook[seasonId] = { leaderboard: [], timeTrialBoards: {}, updatedAt: Date.now() };
+  }
+  seasonalBook[seasonId].leaderboard = state.seasonal.leaderboard.slice(0, 20);
+  seasonalBook[seasonId].timeTrialBoards = { ...(state.seasonal.timeTrialBoards || {}) };
+  seasonalBook[seasonId].updatedAt = Date.now();
+  persistSeasonBook();
+}
+
+function updateSeasonLeaderboard() {
+  ensureSeasonState();
+  const name = state.accountName || state.multiplayer.playerName || 'Driver';
+  const score = Math.round(state.seasonal.score || 0);
+  const record = {
+    name,
+    score,
+    level: state.level,
+    bestLap: state.bestLapTime ? Number(state.bestLapTime.toFixed(2)) : null,
+    updatedAt: Date.now(),
+  };
+  const others = state.seasonal.leaderboard.filter((entry) => entry.name !== name);
+  others.push(record);
+  others.sort((a, b) => b.score - a.score || (a.bestLap || Number.POSITIVE_INFINITY) - (b.bestLap || Number.POSITIVE_INFINITY));
+  state.seasonal.leaderboard = others.slice(0, 20);
+  persistSeasonLeaderboard();
+}
+
+function awardSeasonScore(amount, reason = 'Drive') {
+  if (amount <= 0) {
+    return;
+  }
+  state.seasonal.score += amount;
+  if (reason && amount >= 8) {
+    showToast(`${reason}: +${Math.round(amount)} season score`);
+  }
+  updateSeasonLeaderboard();
+  markUiDirty();
+}
+
+function addMoney(amount, reason = 'Payout') {
+  if (!Number.isFinite(amount) || amount === 0) {
+    return;
+  }
+  state.money = Math.max(0, state.money + amount);
+  if (amount > 0) {
+    markLegitMoneyEvent(2.2);
+  }
+  if (amount > 0 && reason) {
+    showToast(`${reason}: +${formatMoney(amount)}`);
+  }
+  markUiDirty();
+}
+
+function getSeasonTimeTrialBoardKey(mapId = state.currentMap, classId = state.selectedCarClass) {
+  return `${mapId}:${classId}`;
+}
+
+function getSeasonTimeTrialBoard(mapId = state.currentMap, classId = state.selectedCarClass) {
+  const key = getSeasonTimeTrialBoardKey(mapId, classId);
+  const boards = state.seasonal.timeTrialBoards || {};
+  return boards[key] || [];
+}
+
+function recordSeasonTimeTrial(lapTime, mapId = state.currentMap, classId = state.selectedCarClass) {
+  if (!Number.isFinite(lapTime) || lapTime <= 0) {
+    return;
+  }
+  ensureSeasonState();
+  const seasonId = state.seasonal.seasonId || getSeasonId();
+  if (!seasonalBook[seasonId]) {
+    seasonalBook[seasonId] = { leaderboard: [], timeTrialBoards: {}, updatedAt: Date.now() };
+  }
+  seasonalBook[seasonId].timeTrialBoards = seasonalBook[seasonId].timeTrialBoards || {};
+  const key = getSeasonTimeTrialBoardKey(mapId, classId);
+  const name = state.accountName || state.multiplayer.playerName || 'Driver';
+  const existing = seasonalBook[seasonId].timeTrialBoards[key] || [];
+  const others = existing.filter((entry) => entry.name !== name);
+  const previous = existing.find((entry) => entry.name === name);
+  const bestLap = previous ? Math.min(previous.bestLap, lapTime) : lapTime;
+  others.push({
+    name,
+    bestLap: Number(bestLap.toFixed(2)),
+    level: state.level,
+    updatedAt: Date.now(),
+  });
+  others.sort((a, b) => a.bestLap - b.bestLap || b.level - a.level);
+  seasonalBook[seasonId].timeTrialBoards[key] = others.slice(0, 20);
+  seasonalBook[seasonId].updatedAt = Date.now();
+  state.seasonal.timeTrialBoards = { ...seasonalBook[seasonId].timeTrialBoards };
+  state.seasonal.activeTimeTrialBoard = getSeasonTimeTrialBoard(mapId, classId).slice(0, 8);
+  persistSeasonBook();
+}
+
+function getMarketDateKey() {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+}
+
+function buildUsedMarketListings(seed = Date.now()) {
+  const listings = [];
+  for (let index = 0; index < 4; index += 1) {
+    const profile = carCatalog[(index + Math.floor(noise2D(seed, index, 91) * carCatalog.length)) % carCatalog.length];
+    const mileage = 20 + Math.floor(noise2D(seed, index, 32) * 220);
+    const condition = clamp(100 - mileage * 0.24 + noise2D(seed, index, 51) * 8, 46, 96);
+    const discount = clamp(0.44 + condition / 200, 0.45, 0.92);
+    const price = Math.max(55, Math.round(profile.price * discount));
+    listings.push({
+      id: `used-${index}-${seed}`,
+      carId: profile.id,
+      mileage,
+      condition: Math.round(condition),
+      price,
+    });
+  }
+  return listings;
+}
+
+function refreshUsedMarket(force = false) {
+  const now = Date.now();
+  const dateKey = getMarketDateKey();
+  if (!force && state.usedMarket.dateKey === dateKey && now - state.usedMarket.updatedAt < USED_MARKET_ROTATE_MS) {
+    return;
+  }
+  state.usedMarket.dateKey = dateKey;
+  state.usedMarket.updatedAt = now;
+  state.usedMarket.listings = buildUsedMarketListings(now);
+  if (state.centerPanel === 'dealer') {
+    markUiDirty();
+  }
+}
+
+function getRideshareTierFromXp(xp) {
+  let tier = 0;
+  for (let index = 0; index < RIDESHARE_XP_THRESHOLDS.length; index += 1) {
+    if (xp >= RIDESHARE_XP_THRESHOLDS[index]) {
+      tier = index;
+    }
+  }
+  return clamp(tier, 0, RIDESHARE_TIER_LABELS.length - 1);
+}
+
+function getRideshareTierProgress() {
+  const tier = state.rideshare.tier;
+  const currentFloor = RIDESHARE_XP_THRESHOLDS[tier] || 0;
+  const nextFloor = RIDESHARE_XP_THRESHOLDS[tier + 1] || currentFloor;
+  const span = Math.max(1, nextFloor - currentFloor);
+  const progress = clamp((state.rideshare.xp - currentFloor) / span, 0, 1);
+  return {
+    currentFloor,
+    nextFloor,
+    progress,
+    done: tier >= RIDESHARE_TIER_LABELS.length - 1,
+  };
+}
+
+function setReputation(value) {
+  state.reputation = clamp(value, -100, 100);
+}
+
+function addReputation(delta, reason = '') {
+  if (!Number.isFinite(delta) || delta === 0) {
+    return;
+  }
+  const before = state.reputation;
+  setReputation(state.reputation + delta);
+  const crossed = Math.floor(before / 25) !== Math.floor(state.reputation / 25);
+  if (crossed && reason) {
+    showToast(`${reason}. Reputation ${state.reputation > before ? 'improved' : 'dropped'} to ${Math.round(state.reputation)}.`);
+  }
+  markUiDirty();
+}
+
+function getPriceMultiplierFromReputation() {
+  // Better rep gives shop discounts, lower rep raises costs.
+  return clamp(1 - state.reputation * 0.0015, 0.82, 1.22);
+}
+
+function getEarningsMultiplierFromReputation() {
+  // Better rep increases payouts from rides/jobs; bad rep lowers them.
+  return clamp(1 + state.reputation * 0.0018, 0.84, 1.24);
+}
+
+function getDriveStyleConfig() {
+  if (state.driveStyle === 'eco') {
+    return { speed: 0.92, accel: 0.9, handling: 0.94, fuel: 0.74 };
+  }
+  if (state.driveStyle === 'sport') {
+    return { speed: 1.12, accel: 1.12, handling: 1.08, fuel: 1.28 };
+  }
+  return { speed: 1, accel: 1, handling: 1, fuel: 1 };
+}
+
+function cycleDriveStyle() {
+  const order = ['eco', 'normal', 'sport'];
+  const next = order[(order.indexOf(state.driveStyle) + 1) % order.length];
+  state.driveStyle = next;
+  applyPlayerCarTuning();
+  showToast(`Drive style set to ${next[0].toUpperCase() + next.slice(1)}.`);
+  markUiDirty();
+}
+
+function buildRidePointPool() {
+  const points = [];
+  places
+    .filter((place) => place.type !== 'track')
+    .forEach((place) => {
+      points.push({
+        id: place.id,
+        label: place.name,
+        position: (place.entryPoint || place.position).clone(),
+      });
+    });
+  for (let index = 0; index < 8; index += 1) {
+    const x = CITY_SPAWN.x + (noise2D(index, elapsedTime, 31) - 0.5) * 260;
+    const z = CITY_SPAWN.z + (noise2D(index, elapsedTime, 73) - 0.5) * 260;
+    points.push({
+      id: `street-${index}`,
+      label: `Street Stop ${index + 1}`,
+      position: new THREE.Vector3(x, 0, z),
+    });
+  }
+  return points;
+}
+
+function getDynamicEventRideBoost(pickupPos, dropoffPos) {
+  const event = state.dynamicEvent;
+  if (!event.active || !event.center) {
+    return { payoutMultiplier: 1, xpMultiplier: 1, label: null };
+  }
+  const nearPickup = distanceXZ(pickupPos, event.center) <= event.radius + 18;
+  const nearDropoff = distanceXZ(dropoffPos, event.center) <= event.radius + 18;
+  if (!nearPickup && !nearDropoff) {
+    return { payoutMultiplier: 1, xpMultiplier: 1, label: null };
+  }
+  const bothEndsBoost = nearPickup && nearDropoff ? 1.08 : 1;
+  return {
+    payoutMultiplier: event.payoutMultiplier * bothEndsBoost,
+    xpMultiplier: event.xpMultiplier * (nearPickup && nearDropoff ? 1.04 : 1),
+    label: event.label || 'City surge',
+  };
+}
+
+function createRideOffer(seed = Date.now()) {
+  const pool = buildRidePointPool();
+  if (pool.length < 2) {
+    return null;
+  }
+  const tier = state.rideshare.tier;
+  const firstIndex = Math.floor(noise2D(seed, tier, 101) * pool.length);
+  const pickup = pool[firstIndex];
+  let dropoff = null;
+  const minDistance = 95 + tier * 62;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    let secondIndex = Math.floor(noise2D(seed + attempt * 13, tier, 207 + attempt * 9) * pool.length);
+    if (secondIndex === firstIndex) {
+      secondIndex = (secondIndex + 1) % pool.length;
+    }
+    const candidate = pool[secondIndex];
+    if (distanceXZ(pickup.position, candidate.position) >= minDistance || attempt === 7) {
+      dropoff = candidate;
+      break;
+    }
+  }
+  if (!dropoff) {
+    return null;
+  }
+  const rawDistance = Math.max(80, distanceXZ(pickup.position, dropoff.position));
+  const normalized = clamp(rawDistance / 340, 0.24, 1.55);
+  const peakHour =
+    (state.dayTime >= 7 && state.dayTime <= 9.5) || (state.dayTime >= 16 && state.dayTime <= 19.5);
+  const difficulty = clamp(
+    1.05 + tier * 0.56 + normalized * 1.24 + noise2D(seed, tier, 411) * 0.92,
+    1,
+    5.5,
+  );
+  const tierDistanceBonus = 1 + tier * 0.075;
+  const timePressure = clamp(1.18 - normalized * 0.18, 0.86, 1.22);
+  const surge = (peakHour ? 1.14 : 1) * (difficulty >= 3.6 ? 1.08 : 1);
+  const dynamicBoost = getDynamicEventRideBoost(pickup.position, dropoff.position);
+  const fare = Math.round(
+    (32 + rawDistance * (0.33 + tier * 0.09) + difficulty * 27) *
+      tierDistanceBonus *
+      surge *
+      dynamicBoost.payoutMultiplier,
+  );
+  const xp = Math.round(
+    (20 + difficulty * 19 + rawDistance * 0.085) *
+      (1 + tier * 0.05) *
+      dynamicBoost.xpMultiplier,
+  );
+  const timeLimit = 46 + normalized * 68 * timePressure - tier * 1.4;
+  const riderNames = [
+    'Alex',
+    'Sam',
+    'Jordan',
+    'Taylor',
+    'Sky',
+    'Kai',
+    'Riley',
+    'Avery',
+    'Morgan',
+    'Casey',
+    'Logan',
+    'Blake',
+  ];
+  const riderName = riderNames[Math.floor(noise2D(seed, tier, 909) * riderNames.length)];
+  const tierRequired = clamp(
+    Math.floor((difficulty + normalized * 1.2 - 1.9) * 0.8),
+    0,
+    RIDESHARE_TIER_LABELS.length - 1,
+  );
+  return {
+    id: `ride-${seed}-${Math.floor(Math.random() * 9999)}`,
+    riderName,
+    pickup,
+    dropoff,
+    distance: Math.round(rawDistance),
+    difficulty: Number(difficulty.toFixed(1)),
+    fare,
+    xp,
+    timeLimit: Number(timeLimit.toFixed(1)),
+    surge: Number((surge * dynamicBoost.payoutMultiplier).toFixed(2)),
+    eventLabel: dynamicBoost.label,
+    tierRequired,
+  };
+}
+
+function reviveRidePoint(pointLike, fallbackLabel = 'Stop') {
+  if (!pointLike) {
+    return null;
+  }
+  const positionLike = pointLike.position || pointLike;
+  return {
+    id: pointLike.id || `pt-${Math.random().toString(36).slice(2, 7)}`,
+    label: pointLike.label || fallbackLabel,
+    position: new THREE.Vector3(positionLike.x || 0, 0, positionLike.z || 0),
+  };
+}
+
+function reviveRideOffer(rawOffer) {
+  if (!rawOffer) {
+    return null;
+  }
+  const pickup = reviveRidePoint(rawOffer.pickup, 'Pickup');
+  const dropoff = reviveRidePoint(rawOffer.dropoff, 'Dropoff');
+  if (!pickup || !dropoff) {
+    return null;
+  }
+  return {
+    ...rawOffer,
+    pickup,
+    dropoff,
+  };
+}
+
+function rerollRideOffers(force = false) {
+  if (!force && state.rideshare.activeRide) {
+    return;
+  }
+  if (!state.rideshare.online) {
+    return;
+  }
+  if (!force && state.rideshare.rerollTimer > 0) {
+    return;
+  }
+  state.rideshare.offers = [];
+  for (let index = 0; index < 4; index += 1) {
+    const offer = createRideOffer(Date.now() + index * 997);
+    if (offer) {
+      state.rideshare.offers.push(offer);
+    }
+  }
+  if (
+    state.rideshare.offers.length > 0 &&
+    !state.rideshare.offers.some((offer) => offer.tierRequired <= state.rideshare.tier)
+  ) {
+    state.rideshare.offers[0].tierRequired = state.rideshare.tier;
+  }
+  state.rideshare.rerollTimer = 38;
+  if (state.phoneOpen || state.centerPanel === 'rideshare') {
+    markUiDirty();
+  }
+}
+
+function gainRideshareXp(amount) {
+  if (amount <= 0) {
+    return;
+  }
+  state.rideshare.xp += amount;
+  const oldTier = state.rideshare.tier;
+  state.rideshare.tier = getRideshareTierFromXp(state.rideshare.xp);
+  if (state.rideshare.tier > oldTier) {
+    showToast(`Rideshare tier up: ${RIDESHARE_TIER_LABELS[state.rideshare.tier]}.`);
+  }
+}
+
+function getActiveRideTarget() {
+  const ride = state.rideshare.activeRide;
+  if (!ride) {
+    return null;
+  }
+  return ride.stage === 'pickup' ? ride.pickup.position : ride.dropoff.position;
+}
+
+function getActiveRideLabel() {
+  const ride = state.rideshare.activeRide;
+  if (!ride) {
+    return 'No active ride';
+  }
+  return ride.stage === 'pickup' ? `Pickup ${ride.riderName}` : `Dropoff ${ride.riderName}`;
+}
+
+function getCurrentJobLabel() {
+  if (state.rideshare.activeRide) {
+    return `Rideshare Driver (${RIDESHARE_TIER_LABELS[state.rideshare.tier]})`;
+  }
+  const place = state.currentJobId ? placeById.get(state.currentJobId) : null;
+  if (place) {
+    return place.jobTitle;
+  }
+  if (state.rideshare.online) {
+    return `Rideshare Driver (${RIDESHARE_TIER_LABELS[state.rideshare.tier]})`;
+  }
+  return 'None';
+}
+
+function startRideshareRide(offerId) {
+  state.rideshare.online = true;
+  if (state.rideshare.activeRide) {
+    showToast('Finish current ride first.', 'bad');
+    return;
+  }
+  if (state.mode !== 'driving') {
+    showToast('Enter your car to start a ride.', 'bad');
+    return;
+  }
+  const offer = state.rideshare.offers.find((entry) => entry.id === offerId);
+  if (!offer) {
+    showToast('Ride offer expired.', 'bad');
+    return;
+  }
+  if (state.rideshare.tier < offer.tierRequired) {
+    showToast(`Need ${RIDESHARE_TIER_LABELS[offer.tierRequired]} tier for this ride.`, 'bad');
+    return;
+  }
+  state.rideshare.activeRide = {
+    ...offer,
+    stage: 'pickup',
+    elapsed: 0,
+    violationsAtStart: state.totalViolations,
+    wantedAtStart: state.wantedLevel,
+  };
+  state.rideshare.offers = state.rideshare.offers.filter((entry) => entry.id !== offer.id);
+  state.gpsTargetId = 'ride';
+  refreshGpsRoute(true);
+  showToast(`New ride: pick up ${offer.riderName}.`);
+  openCenterPanel('rideshare');
+  markUiDirty();
+}
+
+function cancelRideshareRide(reason = 'Ride canceled') {
+  if (!state.rideshare.activeRide) {
+    return;
+  }
+  state.rideshare.activeRide = null;
+  if (state.gpsTargetId === 'ride') {
+    state.gpsTargetId = null;
+    refreshGpsRoute(true);
+  }
+  showToast(reason, 'bad');
+  addReputation(-1.1, 'Ride canceled');
+  rerollRideOffers(true);
+  markUiDirty();
+}
+
+function completeRideshareRide() {
+  const ride = state.rideshare.activeRide;
+  if (!ride) {
+    return;
+  }
+  const violationDelta = Math.max(0, state.totalViolations - ride.violationsAtStart);
+  const wantedDelta = Math.max(0, state.wantedLevel - ride.wantedAtStart);
+  const cleanFactor = clamp(1 - violationDelta * 0.08 - wantedDelta * 0.14, 0.45, 1.15);
+  const distanceBonus = 1 + ride.distance / 1000;
+  const earningsRepMultiplier = getEarningsMultiplierFromReputation();
+  const styleServiceBonus = state.driveStyle === 'eco' ? 1.05 : state.driveStyle === 'sport' ? 0.97 : 1;
+  const payout = Math.round(ride.fare * cleanFactor * distanceBonus * earningsRepMultiplier * styleServiceBonus);
+  const xp = Math.round(ride.xp * cleanFactor * 1.2 * (state.driveStyle === 'sport' ? 1.05 : 1));
+  addMoney(payout, 'Ride payout');
+  gainRideshareXp(xp);
+  awardXp(xp * 0.45, 'Rideshare');
+  state.rideshare.completed += 1;
+  state.rideshare.stars = clamp(state.rideshare.stars + (cleanFactor > 0.95 ? 0.05 : -0.08), 2.8, 5);
+  addReputation(cleanFactor > 0.95 ? 2.8 : -2.2, 'Rider feedback');
+  state.rideshare.activeRide = null;
+  if (state.gpsTargetId === 'ride') {
+    state.gpsTargetId = null;
+    refreshGpsRoute(true);
+  }
+  showToast(`Ride complete: ${formatMoney(payout)} and ${xp} tier XP.`);
+  rerollRideOffers(true);
+  markUiDirty();
+}
+
+function updateRideshare(dt) {
+  if (state.rideshare.rerollTimer > 0) {
+    state.rideshare.rerollTimer = Math.max(0, state.rideshare.rerollTimer - dt);
+    if (state.rideshare.rerollTimer <= 0) {
+      rerollRideOffers(true);
+    }
+  }
+  const ride = state.rideshare.activeRide;
+  if (!ride) {
+    return;
+  }
+  ride.elapsed += dt;
+  if (ride.elapsed > ride.timeLimit) {
+    cancelRideshareRide('Ride failed: timeout.');
+    addReputation(-3.4, 'Late rides');
+    return;
+  }
+  const target = ride.stage === 'pickup' ? ride.pickup.position : ride.dropoff.position;
+  const distance = distanceXZ(player.position, target);
+  if (distance < 9 && Math.abs(player.speed) < 9) {
+    if (ride.stage === 'pickup') {
+      ride.stage = 'dropoff';
+      state.gpsTargetId = 'ride';
+      refreshGpsRoute(true);
+      showToast(`Passenger onboard. Head to ${ride.dropoff.label}.`);
+    } else {
+      completeRideshareRide();
+    }
+  }
+  if (state.wantedLevel >= 4) {
+    cancelRideshareRide('Passenger canceled due to wanted level.');
+    addReputation(-5, 'Unsafe driving');
+  }
+}
+
+function getNearestParkingSpot(reference = player.position) {
+  if (parkingSpots.length === 0) {
+    return null;
+  }
+  return parkingSpots.reduce((best, spot) => {
+    const distance = distanceXZ(reference, spot.position);
+    return !best || distance < best.distance ? { spot, distance } : best;
+  }, null)?.spot || null;
+}
+
+function setParkingSpotVisibility(activeSpotId = null) {
+  parkingSpots.forEach((spot) => {
+    if (spot.marker?.group) {
+      spot.marker.group.visible = activeSpotId === spot.id;
+    }
+  });
+}
+
+function startParkingChallenge(spotId = null) {
+  const spot =
+    parkingSpots.find((candidate) => candidate.id === spotId) ||
+    getNearestParkingSpot(state.mode === 'driving' ? player.position : avatar.position);
+  if (!spot) {
+    showToast('No parking spots are available yet.', 'bad');
+    return false;
+  }
+  state.parkingChallenge.active = true;
+  state.parkingChallenge.spotId = spot.id;
+  state.parkingChallenge.timer = state.parkingChallenge.maxTimer;
+  setParkingSpotVisibility(spot.id);
+  state.gpsTargetId = 'parking';
+  refreshGpsRoute(true);
+  showToast(`Parking challenge started: park at ${spot.label}.`);
+  markUiDirty();
+  return true;
+}
+
+function stopParkingChallenge(silent = false) {
+  state.parkingChallenge.active = false;
+  state.parkingChallenge.spotId = null;
+  state.parkingChallenge.timer = 0;
+  setParkingSpotVisibility(null);
+  if (state.gpsTargetId === 'parking') {
+    state.gpsTargetId = null;
+    refreshGpsRoute(true);
+    if (!silent) {
+      showToast('Parking route cleared.');
+    }
+  }
+}
+
+function updateParkingChallenge(dt) {
+  if (!state.parkingChallenge.active) {
+    return;
+  }
+  const spot = parkingSpots.find((candidate) => candidate.id === state.parkingChallenge.spotId);
+  if (!spot) {
+    stopParkingChallenge(true);
+    return;
+  }
+  state.parkingChallenge.timer = Math.max(0, state.parkingChallenge.timer - dt);
+  if (state.parkingChallenge.timer <= 0) {
+    stopParkingChallenge(true);
+    showToast('Parking challenge failed: time expired.', 'bad');
+    markUiDirty();
+    return;
+  }
+  if (state.mode !== 'driving') {
+    return;
+  }
+  const distance = distanceXZ(player.position, spot.position);
+  if (distance > PARKING_SUCCESS_RADIUS || Math.abs(player.speed) > PARKING_STOP_SPEED) {
+    return;
+  }
+  const headingError = Math.abs(normalizeAngle(player.heading - spot.heading));
+  const accuracy = clamp(1 - (distance / PARKING_SUCCESS_RADIUS) * 0.62 - (headingError / Math.PI) * 0.38, 0, 1);
+  const reward = Math.round(70 + accuracy * 90);
+  addMoney(reward, 'Parking payout');
+  awardXp(30 + accuracy * 40, 'Parking');
+  state.parkingChallenge.completed += 1;
+  stopParkingChallenge(true);
+  showToast(`Perfect park ${Math.round(accuracy * 100)}%.`);
+}
+
+function buildConvoyRoute() {
+  const references = places
+    .filter((place) => place.type !== 'track')
+    .map((place) => place.entryPoint || place.position)
+    .filter((position) => distanceXZ(position, player.position) > 35);
+  references.sort(
+    (left, right) =>
+      distanceXZ(right, player.position) - distanceXZ(left, player.position) + noise2D(left.x, right.z, elapsedTime),
+  );
+  return references.slice(0, 4).map((position) => position.clone());
+}
+
+function startConvoyJob() {
+  if (state.convoyJob.active) {
+    showToast('Convoy job already active.', 'bad');
+    return;
+  }
+  if (state.drivingSchool.active || state.parkingChallenge.active) {
+    showToast('Finish school or parking challenge first.', 'bad');
+    return;
+  }
+  const route = buildConvoyRoute();
+  if (route.length < 2) {
+    showToast('Could not find a valid convoy route.', 'bad');
+    return;
+  }
+  state.convoyJob.active = true;
+  state.convoyJob.route = route;
+  state.convoyJob.routeIndex = 0;
+  state.convoyJob.segmentTimer = 0;
+  state.convoyJob.segmentLimit = 32 + state.drivingSchool.licenseLevel * 4;
+  state.convoyJob.farTimer = 0;
+  state.convoyJob.payout = 0;
+  state.gpsTargetId = 'convoy';
+  refreshGpsRoute(true);
+  showToast('Convoy contract started. Hit each checkpoint on time.');
+  markUiDirty();
+}
+
+function endConvoyJob(success = false, silent = false) {
+  if (!state.convoyJob.active) {
+    return;
+  }
+  if (success) {
+    const completionBonus = 240 + state.convoyJob.route.length * 35;
+    addMoney(completionBonus, 'Convoy completion bonus');
+    awardXp(130, 'Convoy Job');
+    state.convoyJob.completedRuns += 1;
+    if (!silent) {
+      showToast('Convoy job complete.');
+    }
+  } else if (!silent) {
+    showToast('Convoy job failed.', 'bad');
+  }
+  state.convoyJob.active = false;
+  state.convoyJob.route = [];
+  state.convoyJob.routeIndex = 0;
+  state.convoyJob.segmentTimer = 0;
+  state.convoyJob.farTimer = 0;
+  state.convoyJob.payout = 0;
+  if (state.gpsTargetId === 'convoy') {
+    state.gpsTargetId = null;
+    refreshGpsRoute(true);
+  }
+  markUiDirty();
+}
+
+function updateConvoyJob(dt) {
+  if (!state.convoyJob.active || state.convoyJob.route.length === 0) {
+    return;
+  }
+  const target = state.convoyJob.route[state.convoyJob.routeIndex];
+  if (!target) {
+    endConvoyJob(true);
+    return;
+  }
+  state.missionMessage = `Convoy checkpoint ${state.convoyJob.routeIndex + 1}/${state.convoyJob.route.length}`;
+  const distance = distanceXZ(player.position, target);
+  state.convoyJob.segmentTimer += dt;
+  if (distance > 170) {
+    state.convoyJob.farTimer += dt;
+  } else {
+    state.convoyJob.farTimer = moveTowards(state.convoyJob.farTimer, 0, dt * 1.5);
+  }
+  if (state.convoyJob.farTimer > 8 || state.convoyJob.segmentTimer > state.convoyJob.segmentLimit) {
+    endConvoyJob(false);
+    return;
+  }
+  if (distance < 12) {
+    const segmentReward = 70 + state.convoyJob.routeIndex * 35;
+    state.convoyJob.payout += segmentReward;
+    addMoney(segmentReward, 'Convoy checkpoint');
+    awardXp(28, 'Convoy checkpoint');
+    state.convoyJob.routeIndex += 1;
+    state.convoyJob.segmentTimer = 0;
+    refreshGpsRoute(true);
+    if (state.convoyJob.routeIndex >= state.convoyJob.route.length) {
+      endConvoyJob(true);
+    }
+  }
+}
+
+function startDrivingSchool() {
+  if (state.drivingSchool.active) {
+    showToast('Driving school session already active.', 'bad');
+    return;
+  }
+  if (state.convoyJob.active) {
+    showToast('Finish or cancel your convoy job first.', 'bad');
+    return;
+  }
+  state.drivingSchool.active = true;
+  state.drivingSchool.lessonIndex = 0;
+  state.drivingSchool.progress = 0;
+  state.drivingSchool.violations = 0;
+  state.drivingSchool.parkingBaseline = state.parkingChallenge.completed;
+  if (state.parkingChallenge.active) {
+    stopParkingChallenge(true);
+  }
+  showToast('Driving school started. Lesson 1: smooth control.');
+  markUiDirty();
+}
+
+function stopDrivingSchool(success = false, silent = false) {
+  if (!state.drivingSchool.active) {
+    return;
+  }
+  if (success) {
+    state.drivingSchool.completedRuns += 1;
+    state.drivingSchool.licenseLevel = clamp(state.drivingSchool.licenseLevel + 1, 0, 3);
+    const reward = 220 + state.drivingSchool.licenseLevel * 90;
+    addMoney(reward, 'License reward');
+    awardXp(180, 'Driving School');
+    if (!silent) {
+      showToast(`License upgraded to tier ${state.drivingSchool.licenseLevel}.`);
+    }
+  } else if (!silent) {
+    showToast('Driving school failed. Retry when ready.', 'bad');
+  }
+  state.drivingSchool.active = false;
+  state.drivingSchool.lessonIndex = 0;
+  state.drivingSchool.progress = 0;
+  state.drivingSchool.violations = 0;
+  state.drivingSchool.parkingBaseline = state.parkingChallenge.completed;
+  if (state.parkingChallenge.active) {
+    stopParkingChallenge(true);
+  }
+  applyPlayerCarTuning();
+  markUiDirty();
+}
+
+function stepDrivingSchoolLesson() {
+  state.drivingSchool.lessonIndex += 1;
+  state.drivingSchool.progress = 0;
+  if (state.drivingSchool.lessonIndex >= drivingSchoolLessons.length) {
+    stopDrivingSchool(true);
+    return;
+  }
+  const lesson = drivingSchoolLessons[state.drivingSchool.lessonIndex];
+  if (lesson.id === 'parking') {
+    startParkingChallenge();
+  }
+  showToast(`Lesson ${state.drivingSchool.lessonIndex + 1}: ${lesson.label}`);
+}
+
+function updateDrivingSchool(dt) {
+  if (!state.drivingSchool.active) {
+    return;
+  }
+  if (state.drivingSchool.violations >= 3) {
+    stopDrivingSchool(false);
+    return;
+  }
+  const lesson = drivingSchoolLessons[state.drivingSchool.lessonIndex];
+  if (!lesson) {
+    stopDrivingSchool(true);
+    return;
+  }
+  const mph = Math.abs(player.speed) * 2;
+  if (lesson.id === 'control') {
+    if (state.mode === 'driving' && isPaved(player.position.x, player.position.z) && mph >= 18 && mph <= 52) {
+      state.drivingSchool.progress += dt;
+    } else {
+      state.drivingSchool.progress = moveTowards(state.drivingSchool.progress, 0, dt * 0.45);
+    }
+  } else if (lesson.id === 'lawful') {
+    if (state.mode === 'driving' && state.wantedLevel === 0 && state.lawfulPayout >= 96) {
+      state.drivingSchool.progress += dt;
+    } else {
+      state.drivingSchool.progress = moveTowards(state.drivingSchool.progress, 0, dt * 0.55);
+    }
+  } else if (lesson.id === 'parking') {
+    if (state.parkingChallenge.completed > state.drivingSchool.parkingBaseline) {
+      state.drivingSchool.progress = 1;
+    } else if (!state.parkingChallenge.active) {
+      startParkingChallenge();
+    }
+  }
+  if (state.drivingSchool.progress >= lesson.target) {
+    stepDrivingSchoolLesson();
+  }
+}
+
+function toggleCruiseControl() {
+  if (state.mode !== 'driving') {
+    showToast('Enter your car to use cruise control.', 'bad');
+    return;
+  }
+  state.cruiseControl.enabled = !state.cruiseControl.enabled;
+  state.cruiseControl.targetSpeed = Math.max(0, Math.abs(player.speed));
+  showToast(state.cruiseControl.enabled ? 'Cruise control engaged.' : 'Cruise control disabled.');
+  markUiDirty();
+}
+
+function updateVehicleWear(dt, forwardInput, brakeInput, drifting, onPaved) {
+  const speedFactor = clamp(Math.abs(player.speed) / Math.max(player.maxSpeed, 1), 0, 1.3);
+  const mileageGain = Math.abs(player.speed) * dt * 0.02;
+  state.vehicleWear.mileage += mileageGain;
+  state.vehicleWear.engine = clamp(
+    state.vehicleWear.engine - (0.05 + speedFactor * 0.08 + Math.abs(forwardInput) * 0.06) * dt,
+    18,
+    100,
+  );
+  state.vehicleWear.brakes = clamp(
+    state.vehicleWear.brakes - (0.02 + brakeInput * 0.32 + speedFactor * 0.05) * dt,
+    18,
+    100,
+  );
+  state.vehicleWear.tires = clamp(
+    state.vehicleWear.tires - (0.03 + (drifting ? 0.34 : 0) + (!onPaved ? 0.22 : 0) + speedFactor * 0.05) * dt,
+    14,
+    100,
+  );
+}
+
+function serviceWearPart(part) {
+  if (!['engine', 'brakes', 'tires'].includes(part)) {
+    return;
+  }
+  const current = state.vehicleWear[part];
+  if (current >= 99) {
+    showToast(`${part} wear is already excellent.`, 'bad');
+    return;
+  }
+  const delta = 100 - current;
+  const cost = Math.max(25, Math.round(delta * (part === 'engine' ? 1.4 : part === 'brakes' ? 1.1 : 1.2)));
+  buyUpgrade(
+    cost,
+    () => {
+      state.vehicleWear[part] = 100;
+      state.vehicleWear.lastServiceAt = elapsedTime;
+      applyPlayerCarTuning();
+    },
+    `Serviced ${part}.`,
+  );
+}
+
+function updateReplayBuffer() {
+  if (state.mode !== 'driving' || state.replay.active) {
+    return;
+  }
+  state.replay.buffer.push({
+    x: player.position.x,
+    z: player.position.z,
+    heading: player.heading,
+    speed: player.speed,
+    cameraYaw: state.cameraYaw,
+    cameraPitch: state.cameraPitch,
+  });
+  if (state.replay.buffer.length > REPLAY_MAX_FRAMES) {
+    state.replay.buffer.shift();
+  }
+}
+
+function playReplayClip() {
+  if (state.replay.buffer.length < 80) {
+    showToast('Drive a bit more to build a replay clip.', 'bad');
+    return;
+  }
+  state.replay.playback = state.replay.buffer.slice(-1200);
+  state.replay.frameIndex = 0;
+  state.replay.active = true;
+  state.replay.paused = false;
+  openCenterPanel('replay');
+  showToast('Replay playback started.');
+}
+
+function stopReplayClip() {
+  state.replay.active = false;
+  state.replay.paused = false;
+  state.replay.frameIndex = 0;
+  state.replay.playback = [];
+  setPhotoMode(false);
+  if (state.gameMode !== 'time-trial') {
+    ghostVehicle.mesh.group.visible = false;
+  }
+}
+
+function exportReplayClip() {
+  if (state.replay.buffer.length < 20) {
+    showToast('No replay data yet.', 'bad');
+    return;
+  }
+  const payload = {
+    game: 'City Street Rush',
+    capturedAt: new Date().toISOString(),
+    frames: state.replay.buffer,
+  };
+  const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `city-street-rush-replay-${Date.now()}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showToast('Replay exported.');
+}
+
+function capturePhoto() {
+  const url = renderer.domElement.toDataURL('image/png');
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `city-street-rush-photo-${Date.now()}.png`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  showToast('Photo captured.');
+}
+
+function setPhotoMode(enabled) {
+  state.replay.photoMode = Boolean(enabled);
+  document.body.classList.toggle('photo-mode', state.replay.photoMode);
+}
+
+function pointToSegmentDistanceXZ(point, start, end) {
+  const segX = end.x - start.x;
+  const segZ = end.z - start.z;
+  const segLen2 = segX * segX + segZ * segZ || 1;
+  const t = clamp(((point.x - start.x) * segX + (point.z - start.z) * segZ) / segLen2, 0, 1);
+  const projX = start.x + segX * t;
+  const projZ = start.z + segZ * t;
+  return Math.hypot(point.x - projX, point.z - projZ);
+}
+
+function segmentBlocked(start, end) {
+  const roadblockBlocking = roadblocks.some((roadblock) => {
+    const center = roadblock.center || roadblock.group?.position;
+    return center ? pointToSegmentDistanceXZ(center, start, end) < 9.5 : false;
+  });
+  if (roadblockBlocking) {
+    return true;
+  }
+  return spikeStrips.some((strip) => pointToSegmentDistanceXZ(strip.center, start, end) < 7.5);
+}
+
+function snapToNearestRoad(value) {
+  const local = toChunkLocal(value);
+  let bestLine = ROAD_LINES[0];
+  let bestDist = Math.abs(local - bestLine);
+  for (let index = 1; index < ROAD_LINES.length; index += 1) {
+    const candidate = ROAD_LINES[index];
+    const distance = Math.abs(local - candidate);
+    if (distance < bestDist) {
+      bestDist = distance;
+      bestLine = candidate;
+    }
+  }
+  return getChunkOrigin(getChunkIndex(value)) + bestLine;
+}
+
+function refreshGpsRoute(force = false) {
+  const target = getTargetPosition();
+  if (!target) {
+    state.gpsRoutePoints = [];
+    state.gpsRouteIndex = 0;
+    state.gpsLastTargetKey = '';
+    return;
+  }
+  const source = state.mode === 'driving' ? player.position : avatar.position;
+  const targetKey = `${state.gpsTargetId}:${Math.round(target.x)}:${Math.round(target.z)}:${state.gpsRouteMode}`;
+  if (!force && state.gpsLastTargetKey === targetKey && elapsedTime - state.gpsLastRecomputeAt < 1.2) {
+    return;
+  }
+  const route = [];
+  const pushPoint = (point) => {
+    if (!point) return;
+    const previous = route[route.length - 1];
+    if (!previous || distanceXZ(previous, point) > 2) {
+      route.push(point.clone());
+    }
+  };
+  if (state.gpsRouteMode === 'safest') {
+    const sx = snapToNearestRoad(source.x);
+    const sz = snapToNearestRoad(source.z);
+    const tx = snapToNearestRoad(target.x);
+    const tz = snapToNearestRoad(target.z);
+    pushPoint(new THREE.Vector3(sx, 0, sz));
+    const midA = new THREE.Vector3(sx, 0, tz);
+    const midB = new THREE.Vector3(tx, 0, tz);
+    if (!segmentBlocked(route[route.length - 1], midA)) {
+      pushPoint(midA);
+      pushPoint(midB);
+    } else {
+      const altA = new THREE.Vector3(tx, 0, sz);
+      pushPoint(altA);
+      pushPoint(new THREE.Vector3(tx, 0, tz));
+    }
+  } else {
+    const primaryMid =
+      Math.abs(target.x - source.x) > Math.abs(target.z - source.z)
+        ? new THREE.Vector3(target.x, 0, source.z)
+        : new THREE.Vector3(source.x, 0, target.z);
+    pushPoint(primaryMid);
+  }
+  pushPoint(target.clone());
+  state.gpsRoutePoints = route;
+  state.gpsRouteIndex = 0;
+  state.gpsLastTargetKey = targetKey;
+  state.gpsLastRecomputeAt = elapsedTime;
+}
+
+function getCurrentGpsWaypoint() {
+  if (!state.gpsTargetId || state.gpsRoutePoints.length === 0) {
+    return null;
+  }
+  const reference = state.mode === 'driving' ? player.position : avatar.position;
+  while (state.gpsRouteIndex < state.gpsRoutePoints.length - 1) {
+    const current = state.gpsRoutePoints[state.gpsRouteIndex];
+    if (distanceXZ(reference, current) <= 8) {
+      state.gpsRouteIndex += 1;
+    } else {
+      break;
+    }
+  }
+  return state.gpsRoutePoints[state.gpsRouteIndex] || null;
+}
+
+function markLegitTeleport(frames = 4) {
+  state.antiCheat.teleportGraceFrames = Math.max(state.antiCheat.teleportGraceFrames, frames);
+}
+
+function markLegitMoneyEvent(seconds = 1.4) {
+  state.antiCheat.moneyGraceTimer = Math.max(state.antiCheat.moneyGraceTimer, seconds);
+}
+
+function runAuthorityGuard(dt) {
+  if (!state.antiCheat.lastPlayerPos) {
+    state.antiCheat.lastPlayerPos = player.position.clone();
+    state.antiCheat.lastMoney = state.money;
+    state.antiCheat.lastXp = state.xp;
+    return;
+  }
+  const showAuthorityWarning = (message) => {
+    if (elapsedTime - state.antiCheat.lastWarningAt < 1.25) {
+      return;
+    }
+    state.antiCheat.lastWarningAt = elapsedTime;
+    showToast(message, 'bad');
+  };
+  state.antiCheat.moneyGraceTimer = Math.max(0, state.antiCheat.moneyGraceTimer - dt);
+  state.antiCheat.teleportGraceFrames = Math.max(0, state.antiCheat.teleportGraceFrames - 1);
+
+  const movedDistance = distanceXZ(player.position, state.antiCheat.lastPlayerPos);
+  const maxAllowedDistance = state.antiCheat.teleportGraceFrames > 0 ? 1200 : 68 * dt + 2.5;
+  if (movedDistance > maxAllowedDistance) {
+    player.position.copy(state.antiCheat.lastPlayerPos);
+    player.speed = 0;
+    state.antiCheat.warningCount += 1;
+    showAuthorityWarning('Authority check: invalid movement corrected.');
+  } else {
+    state.antiCheat.lastPlayerPos.copy(player.position);
+  }
+
+  const maxAllowedSpeed =
+    Math.max(player.maxSpeed + 26, 72) +
+    (state.boostActive || state.activeEffects.speedBoost > 0 ? 22 : 0);
+  if (Math.abs(player.speed) > maxAllowedSpeed) {
+    player.speed = Math.sign(player.speed) * maxAllowedSpeed;
+    state.antiCheat.warningCount += 1;
+    showAuthorityWarning('Authority check: speed capped.');
+  }
+
+  const moneyDelta = state.money - state.antiCheat.lastMoney;
+  if (moneyDelta > 5000 && state.antiCheat.moneyGraceTimer <= 0) {
+    state.money = state.antiCheat.lastMoney;
+    state.antiCheat.warningCount += 1;
+    showAuthorityWarning('Authority check: suspicious cash gain reverted.');
+  } else {
+    state.antiCheat.lastMoney = state.money;
+  }
+
+  const xpDelta = state.xp - state.antiCheat.lastXp;
+  if (xpDelta > 1200) {
+    state.xp = state.antiCheat.lastXp;
+    state.antiCheat.warningCount += 1;
+    showAuthorityWarning('Authority check: suspicious XP gain reverted.');
+  } else {
+    state.antiCheat.lastXp = state.xp;
+  }
+}
+
+function initAudioIfNeeded() {
+  if (!state.audio.enabled || state.audio.initialized) {
+    return;
+  }
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) {
+      return;
+    }
+    audioContext = new AudioCtx();
+    audioMasterGain = audioContext.createGain();
+    audioMasterGain.gain.value = state.audio.masterVolume;
+    audioMasterGain.connect(audioContext.destination);
+
+    engineOscillator = audioContext.createOscillator();
+    engineOscillator.type = 'sawtooth';
+    engineGain = audioContext.createGain();
+    engineGain.gain.value = 0.0001;
+    engineOscillator.frequency.value = 70;
+    engineOscillator.connect(engineGain);
+    engineGain.connect(audioMasterGain);
+    engineOscillator.start();
+
+    sirenOscillator = audioContext.createOscillator();
+    sirenOscillator.type = 'square';
+    sirenGain = audioContext.createGain();
+    sirenGain.gain.value = 0.0001;
+    sirenOscillator.frequency.value = 420;
+    sirenOscillator.connect(sirenGain);
+    sirenGain.connect(audioMasterGain);
+    sirenOscillator.start();
+    state.audio.initialized = true;
+  } catch {
+    state.audio.enabled = false;
+  }
+}
+
+function playUiTone(frequency = 520, duration = 0.08, type = 'sine', volume = 0.16) {
+  if (!audioContext || !audioMasterGain || !state.audio.enabled) {
+    return;
+  }
+  const now = audioContext.currentTime;
+  const osc = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(frequency, now);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  osc.connect(gain);
+  gain.connect(audioMasterGain);
+  osc.start(now);
+  osc.stop(now + duration + 0.02);
+}
+
+function updateAudio(dt) {
+  if (!state.audio.enabled || !state.audio.initialized || !audioContext) {
+    return;
+  }
+  const targetEngineGain = state.mode === 'driving' ? 0.02 + Math.abs(player.speed) * 0.0024 : 0.001;
+  const targetEngineFreq = 65 + Math.abs(player.speed) * 6 + (state.boostActive ? 25 : 0);
+  engineGain.gain.setTargetAtTime(targetEngineGain, audioContext.currentTime, Math.max(0.01, dt * 0.4));
+  engineOscillator.frequency.setTargetAtTime(targetEngineFreq, audioContext.currentTime, Math.max(0.01, dt * 0.25));
+
+  const sirenActive = state.wantedLevel > 0 && state.mode === 'driving' && state.gameMode !== 'time-trial';
+  const sirenTargetGain = sirenActive ? 0.018 : 0.0001;
+  const sirenFreq = 430 + Math.sin(elapsedTime * 6.8) * 120;
+  sirenGain.gain.setTargetAtTime(sirenTargetGain, audioContext.currentTime, Math.max(0.01, dt * 0.6));
+  sirenOscillator.frequency.setTargetAtTime(sirenFreq, audioContext.currentTime, Math.max(0.01, dt * 0.2));
+}
+
+function clearRemotePlayers() {
+  remotePlayers.forEach((remote) => {
+    scene.remove(remote.mesh.group);
+  });
+  remotePlayers.clear();
+  state.multiplayer.peers = {};
+  state.multiplayer.peerCount = 0;
+}
+
+function sanitizeRoomCode(roomCode) {
+  return String(roomCode || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 16);
+}
+
+function ensureRemotePlayer(peerId, payload) {
+  if (!peerId || peerId === state.multiplayer.playerId) {
+    return null;
+  }
+  let remote = remotePlayers.get(peerId);
+  if (!remote) {
+    const color = Number.parseInt(`0x${peerId.slice(-6).padStart(6, '3')}`, 16);
+    const mesh = createCarMesh(color, false);
+    mesh.group.visible = true;
+    scene.add(mesh.group);
+    remote = {
+      id: peerId,
+      name: payload.name || `Driver-${peerId.slice(-3)}`,
+      mesh,
+      position: new THREE.Vector3(payload.x || 0, 0, payload.z || 0),
+      targetPosition: new THREE.Vector3(payload.x || 0, 0, payload.z || 0),
+      heading: payload.heading || 0,
+      targetHeading: payload.heading || 0,
+      speed: payload.speed || 0,
+      mode: payload.mode || 'driving',
+      gameMode: payload.gameMode || 'free',
+      mapId: payload.mapId || 'city',
+      lastSeen: elapsedTime,
+    };
+    remotePlayers.set(peerId, remote);
+  }
+  remote.name = payload.name || remote.name;
+  remote.targetPosition.set(payload.x || remote.position.x, 0, payload.z || remote.position.z);
+  remote.targetHeading = payload.heading || remote.heading;
+  remote.speed = payload.speed || remote.speed;
+  remote.mode = payload.mode || remote.mode;
+  remote.gameMode = payload.gameMode || remote.gameMode;
+  remote.mapId = payload.mapId || remote.mapId;
+  remote.lastSeen = elapsedTime;
+  const previousCount = state.multiplayer.peerCount;
+  state.multiplayer.peers[peerId] = {
+    name: remote.name,
+    mode: remote.mode,
+    gameMode: remote.gameMode,
+    mapId: remote.mapId,
+    lastSeen: remote.lastSeen,
+  };
+  state.multiplayer.peerCount = Object.keys(state.multiplayer.peers).length;
+  if (state.multiplayer.peerCount !== previousCount) {
+    markUiDirty();
+  }
+  return remote;
+}
+
+function handleMultiplayerMessage(event) {
+  const message = event?.data;
+  if (!message || message.playerId === state.multiplayer.playerId) {
+    return;
+  }
+  if (message.type === 'hello') {
+    ensureRemotePlayer(message.playerId, message.payload || {});
+    return;
+  }
+  if (message.type === 'state') {
+    ensureRemotePlayer(message.playerId, message.payload || {});
+  }
+}
+
+function leaveMultiplayerRoom(silent = false) {
+  if (multiplayerChannel) {
+    multiplayerChannel.close();
+    multiplayerChannel = null;
+  }
+  clearRemotePlayers();
+  state.multiplayer.enabled = false;
+  state.multiplayer.roomCode = '';
+  state.multiplayer.connectedAt = 0;
+  state.multiplayerSendTimer = 0;
+  if (!silent) {
+    showToast('Left multiplayer room.');
+  }
+  markUiDirty();
+}
+
+function joinMultiplayerRoom(roomCode, playerName = state.multiplayer.playerName) {
+  if (typeof BroadcastChannel === 'undefined') {
+    showToast('Multiplayer is not supported in this browser.', 'bad');
+    return;
+  }
+  const cleanRoom = sanitizeRoomCode(roomCode);
+  if (!cleanRoom) {
+    showToast('Enter a valid room code.', 'bad');
+    return;
+  }
+  leaveMultiplayerRoom(true);
+  state.multiplayer.playerName = (playerName || 'Driver').trim().slice(0, 16) || 'Driver';
+  window.localStorage.setItem(MULTIPLAYER_NAME_KEY, state.multiplayer.playerName);
+  state.multiplayer.roomCode = cleanRoom;
+  state.multiplayer.enabled = true;
+  state.multiplayer.connectedAt = elapsedTime;
+  state.multiplayerSendTimer = 0;
+  multiplayerChannel = new BroadcastChannel(`csr-room-${cleanRoom}`);
+  multiplayerChannel.addEventListener('message', handleMultiplayerMessage);
+  multiplayerChannel.postMessage({
+    type: 'hello',
+    playerId: state.multiplayer.playerId,
+    payload: {
+      name: state.multiplayer.playerName,
+      x: player.position.x,
+      z: player.position.z,
+      heading: player.heading,
+      speed: player.speed,
+      mode: state.mode,
+      gameMode: state.gameMode,
+      mapId: state.currentMap,
+    },
+  });
+  showToast(`Joined room ${cleanRoom}. Open same room on another tab/device.`);
+  markUiDirty();
+}
+
+function sendMultiplayerState(force = false) {
+  if (!state.multiplayer.enabled || !multiplayerChannel) {
+    return;
+  }
+  if (!force && state.multiplayerSendTimer < 1 / MULTIPLAYER_BROADCAST_HZ) {
+    return;
+  }
+  state.multiplayerSendTimer = 0;
+  multiplayerChannel.postMessage({
+    type: 'state',
+    playerId: state.multiplayer.playerId,
+    payload: {
+      name: state.multiplayer.playerName,
+      x: player.position.x,
+      z: player.position.z,
+      heading: player.heading,
+      speed: player.speed,
+      mode: state.mode,
+      gameMode: state.gameMode,
+      mapId: state.currentMap,
+      level: state.level,
+    },
+  });
+}
+
+function updateMultiplayer(dt) {
+  if (!state.multiplayer.enabled) {
+    return;
+  }
+  state.multiplayerSendTimer += dt;
+  sendMultiplayerState(false);
+  const stalePeers = [];
+  remotePlayers.forEach((remote, peerId) => {
+    const sinceSeen = elapsedTime - remote.lastSeen;
+    if (sinceSeen > 10) {
+      stalePeers.push(peerId);
+      return;
+    }
+    remote.position.lerp(remote.targetPosition, 1 - Math.exp(-dt * 7));
+    remote.heading = moveAngleTowards(remote.heading, remote.targetHeading, dt * 4.5);
+    remote.mesh.group.position.set(
+      remote.position.x,
+      terrainHeightAt(remote.position.x, remote.position.z) + 0.03,
+      remote.position.z,
+    );
+    remote.mesh.group.rotation.y = -remote.heading + (remote.mesh.headingOffset || 0);
+    const transparency = clamp(1 - sinceSeen / 8, 0.3, 1);
+    remote.mesh.group.traverse((child) => {
+      if (child.isMesh && child.material) {
+        child.material.transparent = true;
+        child.material.opacity = transparency;
+      }
+    });
+  });
+  let removedAny = false;
+  stalePeers.forEach((peerId) => {
+    const remote = remotePlayers.get(peerId);
+    if (remote) {
+      scene.remove(remote.mesh.group);
+      remotePlayers.delete(peerId);
+      delete state.multiplayer.peers[peerId];
+      removedAny = true;
+    }
+  });
+  state.multiplayer.peerCount = Object.keys(state.multiplayer.peers).length;
+  if (removedAny) {
+    markUiDirty();
+  }
 }
 
 function getCarProfile() {
@@ -1934,6 +3597,9 @@ function awardXp(amount, source = 'Activity') {
     return;
   }
   state.xp += amount;
+  if (amount >= 5) {
+    state.seasonal.score += amount * 0.45;
+  }
   let leveledUp = false;
   while (state.xp >= levelXpRequirement(state.level)) {
     state.xp -= levelXpRequirement(state.level);
@@ -1942,8 +3608,10 @@ function awardXp(amount, source = 'Activity') {
   }
   if (leveledUp) {
     showToast(`Level up! You are now level ${state.level}.`);
+    updateSeasonLeaderboard();
   } else if (amount >= 35) {
     showToast(`${source}: +${Math.round(amount)} XP`);
+    updateSeasonLeaderboard();
   }
   markUiDirty();
 }
@@ -1970,26 +3638,39 @@ function updateProgressMetric(metric, amount) {
 function applyPlayerCarTuning() {
   const profile = getCarProfile();
   const classProfile = getCarClassForProfile(profile);
+  const driveStyle = getDriveStyleConfig();
   const conditionFactor = lerp(0.45, 1, state.carCondition / 100);
+  const wearEngineFactor = lerp(0.72, 1, state.vehicleWear.engine / 100);
+  const wearBrakeFactor = lerp(0.75, 1, state.vehicleWear.brakes / 100);
+  const wearTireFactor = lerp(0.72, 1, state.vehicleWear.tires / 100);
   const tireDamageFactor = state.tireDamageTimer > 0 ? 0.72 : 1;
   const weatherGrip = (state.weatherGripFactor || 1) * (state.mapGripFactor || 1);
   const chaosSpeedBoost = state.activeEffects.superSpeed > 0 ? 1.22 : 1;
+  const licenseSpeedFactor = 1 + state.drivingSchool.licenseLevel * 0.04;
   player.maxSpeed =
     (52 + profile.maxSpeedBonus + state.engineLevel * 7 + state.turboLevel * 3) *
     classProfile.speed *
+    driveStyle.speed *
     chaosSpeedBoost *
     conditionFactor *
-    tireDamageFactor;
+    tireDamageFactor *
+    wearEngineFactor *
+    licenseSpeedFactor;
   player.acceleration =
     (32 + profile.accelBonus + state.engineLevel * 5 + state.turboLevel * 3) *
     classProfile.accel *
+    driveStyle.accel *
     chaosSpeedBoost *
-    weatherGrip;
+    weatherGrip *
+    wearEngineFactor;
   player.turnRate =
     (1.86 + state.handlingLevel * 0.24 + state.tireGripLevel * 0.12 + state.suspensionLevel * 0.08) *
     classProfile.turn *
+    driveStyle.handling *
     weatherGrip *
-    state.steeringSensitivity;
+    state.steeringSensitivity *
+    wearTireFactor;
+  player.reverseSpeed = Math.max(8, 10 * wearBrakeFactor);
   const paintHex = state.paintColor || profile.color;
   const parsedPaintHex =
     typeof paintHex === 'string' ? Number.parseInt(paintHex.replace('#', '0x'), 16) : paintHex;
@@ -2047,6 +3728,8 @@ function persistSettings() {
   window.localStorage.setItem('csr_look_sens', String(state.lookSensitivity));
   window.localStorage.setItem('csr_steer_sens', String(state.steeringSensitivity));
   window.localStorage.setItem('csr_invert_y', state.invertLookY ? '1' : '0');
+  window.localStorage.setItem('csr_audio_enabled', state.audio.enabled ? '1' : '0');
+  window.localStorage.setItem('csr_audio_vol', String(state.audio.masterVolume));
 }
 
 function persistAccounts() {
@@ -2079,6 +3762,8 @@ function captureSaveSnapshot() {
       tireGripLevel: state.tireGripLevel,
       suspensionLevel: state.suspensionLevel,
       turboLevel: state.turboLevel,
+      vehicleWear: state.vehicleWear,
+      usedMarket: state.usedMarket,
       nitroCharge: state.nitroCharge,
       carModelId: state.carModelId,
       currentJobId: state.currentJobId,
@@ -2095,6 +3780,11 @@ function captureSaveSnapshot() {
       dayTime: state.dayTime,
       gameMode: state.gameMode,
       currentMap: state.currentMap,
+      gpsRouteMode: state.gpsRouteMode,
+      multiplayerName: state.multiplayer.playerName,
+      audioEnabled: state.audio.enabled,
+      audioVolume: state.audio.masterVolume,
+      seasonal: state.seasonal,
       policeChaseRole: state.policeChaseRole,
       selectedCarClass: state.selectedCarClass,
       paintColor: state.paintColor,
@@ -2103,12 +3793,26 @@ function captureSaveSnapshot() {
       spoilerLevel: state.spoilerLevel,
       bodyKitLevel: state.bodyKitLevel,
       controlChaosEnabled: state.controlChaosEnabled,
+      rideshare: state.rideshare,
       xp: state.xp,
       level: state.level,
       achievements: state.achievements,
       dailyChallenges: state.dailyChallenges,
       bestLapTime: state.bestLapTime,
       ghostPlayback: state.ghostPlayback,
+      convoyJob: state.convoyJob,
+      parkingChallenge: state.parkingChallenge,
+      drivingSchool: state.drivingSchool,
+      assists: state.assists,
+      driveStyle: state.driveStyle,
+      reputation: state.reputation,
+      garages: state.garages,
+      lawSignals: state.lawSignals,
+      onboarding: state.onboarding,
+      replay: {
+        buffer: state.replay.buffer,
+      },
+      cruiseControl: state.cruiseControl,
     },
     player: {
       position: { x: player.position.x, z: player.position.z },
@@ -2142,6 +3846,20 @@ function applySaveSnapshot(snapshot) {
   state.tireGripLevel = clamp(safeState.tireGripLevel ?? 0, 0, 3);
   state.suspensionLevel = clamp(safeState.suspensionLevel ?? 0, 0, 3);
   state.turboLevel = clamp(safeState.turboLevel ?? 0, 0, 3);
+  if (safeState.vehicleWear && typeof safeState.vehicleWear === 'object') {
+    state.vehicleWear.engine = clamp(Number(safeState.vehicleWear.engine ?? state.vehicleWear.engine), 12, 100);
+    state.vehicleWear.brakes = clamp(Number(safeState.vehicleWear.brakes ?? state.vehicleWear.brakes), 12, 100);
+    state.vehicleWear.tires = clamp(Number(safeState.vehicleWear.tires ?? state.vehicleWear.tires), 12, 100);
+    state.vehicleWear.mileage = Math.max(0, Number(safeState.vehicleWear.mileage ?? state.vehicleWear.mileage));
+    state.vehicleWear.lastServiceAt = Number(safeState.vehicleWear.lastServiceAt ?? state.vehicleWear.lastServiceAt) || 0;
+  }
+  if (safeState.usedMarket && typeof safeState.usedMarket === 'object') {
+    state.usedMarket = {
+      ...state.usedMarket,
+      ...safeState.usedMarket,
+      listings: Array.isArray(safeState.usedMarket.listings) ? safeState.usedMarket.listings.slice(0, 12) : [],
+    };
+  }
   state.nitroCharge = clamp(safeState.nitroCharge ?? 100, 0, 100);
   state.carModelId = safeState.carModelId || 'starter';
   state.currentJobId = safeState.currentJobId || null;
@@ -2158,6 +3876,31 @@ function applySaveSnapshot(snapshot) {
   state.dayTime = clamp(safeState.dayTime ?? 10.5, 0, 24);
   state.gameMode = gameModes.some((mode) => mode.id === safeState.gameMode) ? safeState.gameMode : 'free';
   state.currentMap = mapPresets.some((map) => map.id === safeState.currentMap) ? safeState.currentMap : 'city';
+  state.gpsRouteMode = safeState.gpsRouteMode === 'safest' ? 'safest' : 'fastest';
+  state.multiplayer.playerName =
+    typeof safeState.multiplayerName === 'string' && safeState.multiplayerName.trim()
+      ? safeState.multiplayerName.trim().slice(0, 16)
+      : state.multiplayer.playerName;
+  state.audio.enabled = safeState.audioEnabled !== false;
+  state.audio.masterVolume = clamp(
+    Number.isFinite(safeState.audioVolume) ? safeState.audioVolume : state.audio.masterVolume,
+    0,
+    1,
+  );
+  if (safeState.seasonal && typeof safeState.seasonal === 'object') {
+    state.seasonal = {
+      ...state.seasonal,
+      ...safeState.seasonal,
+      weeklyChallenge: {
+        ...state.seasonal.weeklyChallenge,
+        ...(safeState.seasonal.weeklyChallenge || {}),
+      },
+      progress: {
+        ...state.seasonal.progress,
+        ...(safeState.seasonal.progress || {}),
+      },
+    };
+  }
   state.policeChaseRole = safeState.policeChaseRole === 'cop' ? 'cop' : 'runner';
   state.selectedCarClass = ['speed', 'tank', 'drift'].includes(safeState.selectedCarClass)
     ? safeState.selectedCarClass
@@ -2168,6 +3911,22 @@ function applySaveSnapshot(snapshot) {
   state.spoilerLevel = clamp(safeState.spoilerLevel ?? 0, 0, 3);
   state.bodyKitLevel = clamp(safeState.bodyKitLevel ?? 0, 0, 3);
   state.controlChaosEnabled = Boolean(safeState.controlChaosEnabled);
+  if (safeState.rideshare && typeof safeState.rideshare === 'object') {
+    const revivedOffers = Array.isArray(safeState.rideshare.offers)
+      ? safeState.rideshare.offers
+          .slice(0, 8)
+          .map((entry) => reviveRideOffer(entry))
+          .filter(Boolean)
+      : [];
+    const revivedActive = safeState.rideshare.activeRide ? reviveRideOffer(safeState.rideshare.activeRide) : null;
+    state.rideshare = {
+      ...state.rideshare,
+      ...safeState.rideshare,
+      offers: revivedOffers,
+      activeRide: revivedActive,
+    };
+    state.rideshare.tier = getRideshareTierFromXp(state.rideshare.xp || 0);
+  }
   state.xp = Math.max(0, safeState.xp || 0);
   state.level = Math.max(1, safeState.level || 1);
   state.achievements = Array.isArray(safeState.achievements) ? safeState.achievements.slice(0, 64) : [];
@@ -2181,10 +3940,63 @@ function applySaveSnapshot(snapshot) {
   }
   state.bestLapTime = Number.isFinite(safeState.bestLapTime) ? safeState.bestLapTime : null;
   state.ghostPlayback = Array.isArray(safeState.ghostPlayback) ? safeState.ghostPlayback.slice(0, 6000) : null;
+  if (safeState.convoyJob && typeof safeState.convoyJob === 'object') {
+    state.convoyJob = {
+      ...state.convoyJob,
+      ...safeState.convoyJob,
+      route: Array.isArray(safeState.convoyJob.route)
+        ? safeState.convoyJob.route
+            .slice(0, 8)
+            .map((point) => new THREE.Vector3(point.x || 0, 0, point.z || 0))
+        : [],
+    };
+  }
+  if (safeState.parkingChallenge && typeof safeState.parkingChallenge === 'object') {
+    state.parkingChallenge = { ...state.parkingChallenge, ...safeState.parkingChallenge };
+  }
+  if (safeState.drivingSchool && typeof safeState.drivingSchool === 'object') {
+    state.drivingSchool = { ...state.drivingSchool, ...safeState.drivingSchool };
+  }
+  if (safeState.assists && typeof safeState.assists === 'object') {
+    state.assists = {
+      abs: safeState.assists.abs !== false,
+      traction: safeState.assists.traction !== false,
+      stability: safeState.assists.stability !== false,
+    };
+  }
+  state.driveStyle = ['eco', 'normal', 'sport'].includes(safeState.driveStyle) ? safeState.driveStyle : 'normal';
+  state.reputation = clamp(Number(safeState.reputation ?? state.reputation), -100, 100);
+  if (safeState.garages && typeof safeState.garages === 'object') {
+    state.garages = {
+      ...state.garages,
+      ...safeState.garages,
+      storedCars: Array.isArray(safeState.garages.storedCars) ? safeState.garages.storedCars.slice(0, 24) : [],
+    };
+  }
+  if (safeState.lawSignals && typeof safeState.lawSignals === 'object') {
+    state.lawSignals = { ...state.lawSignals, ...safeState.lawSignals };
+  }
+  if (safeState.onboarding && typeof safeState.onboarding === 'object') {
+    state.onboarding = {
+      ...state.onboarding,
+      ...safeState.onboarding,
+      completed: safeState.onboarding.completed === true || state.onboarding.completed,
+    };
+  }
+  if (safeState.replay?.buffer && Array.isArray(safeState.replay.buffer)) {
+    state.replay.buffer = safeState.replay.buffer.slice(-REPLAY_MAX_FRAMES);
+  }
+  if (safeState.cruiseControl && typeof safeState.cruiseControl === 'object') {
+    state.cruiseControl = {
+      enabled: Boolean(safeState.cruiseControl.enabled),
+      targetSpeed: Math.max(0, Number(safeState.cruiseControl.targetSpeed) || 0),
+    };
+  }
   state.trackRaceActive = false;
   state.raceFinished = false;
   state.finishOrderCounter = 0;
 
+  markLegitTeleport(12);
   if (snapshot.player?.position) {
     player.position.set(snapshot.player.position.x || CITY_SPAWN.x, 0, snapshot.player.position.z || CITY_SPAWN.z);
     player.heading = snapshot.player.heading || 0;
@@ -2199,6 +4011,24 @@ function applySaveSnapshot(snapshot) {
   state.inInterior = false;
   state.interiorPlaceId = null;
   state.interiorReturnSnapshot = null;
+  state.replay.active = false;
+  state.replay.paused = false;
+  state.replay.playback = [];
+  state.replay.frameIndex = 0;
+  setPhotoMode(false);
+  if (state.onboarding.completed) {
+    window.localStorage.setItem('csr_onboarding_done', '1');
+  }
+  clearDynamicEvent();
+  state.dynamicEvent.timer =
+    DYNAMIC_EVENT_RESPAWN_MIN + Math.random() * (DYNAMIC_EVENT_RESPAWN_MAX - DYNAMIC_EVENT_RESPAWN_MIN);
+  if (!state.rideshare.offers || state.rideshare.offers.length === 0) {
+    rerollRideOffers(true);
+  }
+  if (state.rideshare.activeRide) {
+    state.gpsTargetId = 'ride';
+  }
+  refreshGpsRoute(true);
   applyPlayerCarTuning();
   markUiDirty();
 }
@@ -2382,6 +4212,9 @@ function damageCar(amount, reason) {
   const classArmor = getCarClassForProfile().armor || 1;
   const scaledAmount = amount * (1 - state.armorLevel * 0.12) / classArmor;
   state.carCondition = clamp(state.carCondition - scaledAmount, 0, 100);
+  state.vehicleWear.engine = clamp(state.vehicleWear.engine - scaledAmount * 0.08, 12, 100);
+  state.vehicleWear.brakes = clamp(state.vehicleWear.brakes - scaledAmount * 0.06, 12, 100);
+  state.vehicleWear.tires = clamp(state.vehicleWear.tires - scaledAmount * 0.1, 10, 100);
   if (reason && elapsedTime - state.lastConditionHitTime > 1.5) {
     state.lastConditionHitTime = elapsedTime;
     showToast(reason, 'bad');
@@ -2403,6 +4236,15 @@ function getTargetPosition(targetId = state.gpsTargetId) {
   if (targetId === 'car') {
     return player.position;
   }
+  if (targetId === 'ride') {
+    return getActiveRideTarget();
+  }
+  if (targetId === 'parking' && state.parkingChallenge.spotId) {
+    return parkingSpots.find((spot) => spot.id === state.parkingChallenge.spotId)?.position || null;
+  }
+  if (targetId === 'convoy' && state.convoyJob.active) {
+    return state.convoyJob.route[state.convoyJob.routeIndex] || null;
+  }
   const place = placeById.get(targetId);
   if (!place) {
     return null;
@@ -2417,12 +4259,21 @@ function getTargetLabel(targetId = state.gpsTargetId) {
   if (targetId === 'car') {
     return 'Your Car';
   }
+  if (targetId === 'ride') {
+    return getActiveRideLabel();
+  }
+  if (targetId === 'parking') {
+    return 'Parking Spot';
+  }
+  if (targetId === 'convoy') {
+    return 'Convoy Checkpoint';
+  }
   const place = placeById.get(targetId);
   return place ? place.name : 'No GPS';
 }
 
 function controlsLocked() {
-  return Boolean(state.phoneOpen || state.backpackOpen || state.centerPanel || state.jailTimer > 0);
+  return Boolean(state.phoneOpen || state.backpackOpen || state.centerPanel || state.jailTimer > 0 || state.replay.active);
 }
 
 function markUiDirty() {
@@ -2436,6 +4287,12 @@ function releasePointerLock() {
 }
 
 function closePanels() {
+  if (state.replay.active) {
+    stopReplayClip();
+  }
+  if (state.replay.photoMode) {
+    setPhotoMode(false);
+  }
   state.phoneOpen = false;
   state.backpackOpen = false;
   state.centerPanel = null;
@@ -2476,6 +4333,9 @@ function toggleBackpack() {
 }
 
 function openCenterPanel(panelId) {
+  if (state.replay.active && panelId !== 'replay') {
+    stopReplayClip();
+  }
   releasePointerLock();
   state.centerPanel = panelId;
   state.phoneOpen = false;
@@ -2488,13 +4348,15 @@ function openCenterPanel(panelId) {
 
 function setGpsTarget(targetId) {
   state.gpsTargetId = targetId || null;
+  state.gpsRouteIndex = 0;
+  refreshGpsRoute(true);
   showToast(state.gpsTargetId ? `GPS set to ${getTargetLabel(targetId)}.` : 'GPS cleared.');
   markUiDirty();
 }
 
 function buyUpgrade(cost, onSuccess, successMessage) {
   if (state.money < cost) {
-    showToast('Not enough cash for that purchase.', 'bad');
+    showToast(`Not enough cash. Need ${formatMoney(cost)} (you have ${formatMoney(state.money)}).`, 'bad');
     return;
   }
   state.money -= cost;
@@ -2515,6 +4377,9 @@ function applyPenalty(amount, message, wantedHeat = 0.4) {
   }
   state.lawfulPayout = clamp(state.lawfulPayout - amount, 0, 100);
   state.totalViolations += 1;
+  if (state.drivingSchool.active) {
+    state.drivingSchool.violations += 1;
+  }
   state.cityBonusTimer = 0;
   state.wantedHeat = clamp(state.wantedHeat + wantedHeat, 0, 5);
   state.wantedTimer = Math.max(state.wantedTimer, 30 + wantedHeat * 10);
@@ -2593,6 +4458,7 @@ function handleGasStationAction(action) {
       return;
     }
     state.money += total;
+    markLegitMoneyEvent(2);
     state.backpack.length = 0;
     showToast(`Sold all backpack cargo for ${formatMoney(total)}.`);
     markUiDirty();
@@ -2748,20 +4614,30 @@ function workShift(place) {
     showToast(`Apply at ${place.name} first.`, 'bad');
     return;
   }
+  const pay = Math.round(
+    place.pay *
+      (1 + state.drivingSchool.licenseLevel * 0.08) *
+      getEarningsMultiplierFromReputation(),
+  );
   state.lastJobTimes[place.id] = elapsedTime;
-  state.money += place.pay;
-  showToast(`Shift complete. ${place.name} paid you ${formatMoney(place.pay)}.`);
+  state.money += pay;
+  markLegitMoneyEvent(2);
+  showToast(`Shift complete. ${place.name} paid you ${formatMoney(pay)}.`);
+  addReputation(0.8, 'Shift completed');
   awardXp(18, 'Work Shift');
   markUiDirty();
 }
 
 function completeMission(mission) {
-  state.money += mission.reward;
+  const payout = Math.round(mission.reward * getEarningsMultiplierFromReputation());
+  state.money += payout;
+  markLegitMoneyEvent(2);
   state.missionsCompleted += 1;
   state.activeMissionId = null;
   state.missionProgress = 0;
-  state.missionMessage = `${mission.title} complete. Reward ${formatMoney(mission.reward)}.`;
+  state.missionMessage = `${mission.title} complete. Reward ${formatMoney(payout)}.`;
   showToast(state.missionMessage);
+  addReputation(1.1, 'Mission delivered');
   markUiDirty();
 }
 
@@ -2819,6 +4695,160 @@ function updateMission(dt) {
   }
 }
 
+function getDynamicEventProfiles() {
+  return [
+    {
+      id: 'roadwork',
+      label: 'Roadwork Zone',
+      color: 0xffb703,
+      radius: 34,
+      duration: 58,
+      payoutMultiplier: 1.15,
+      xpMultiplier: 1.08,
+      speedLimit: 18,
+    },
+    {
+      id: 'concert',
+      label: 'Concert Rush',
+      color: 0xf72585,
+      radius: 44,
+      duration: 64,
+      payoutMultiplier: 1.2,
+      xpMultiplier: 1.12,
+      speedLimit: 22,
+    },
+    {
+      id: 'airport',
+      label: 'Airport Surge',
+      color: 0x4cc9f0,
+      radius: 52,
+      duration: 70,
+      payoutMultiplier: 1.26,
+      xpMultiplier: 1.16,
+      speedLimit: 24,
+    },
+  ];
+}
+
+function clearDynamicEvent() {
+  if (state.dynamicEvent.marker?.group) {
+    scene.remove(state.dynamicEvent.marker.group);
+  }
+  state.dynamicEvent.active = false;
+  state.dynamicEvent.type = null;
+  state.dynamicEvent.label = '';
+  state.dynamicEvent.center = null;
+  state.dynamicEvent.radius = 0;
+  state.dynamicEvent.payoutMultiplier = 1;
+  state.dynamicEvent.xpMultiplier = 1;
+  state.dynamicEvent.speedLimit = 0;
+  state.dynamicEvent.overspeedTimer = 0;
+  state.dynamicEvent.locationLabel = '';
+  state.dynamicEvent.marker = null;
+  state.dynamicEvent.shownHintAt = -999;
+}
+
+function spawnDynamicEvent() {
+  clearDynamicEvent();
+  const profiles = getDynamicEventProfiles();
+  const profile = profiles[Math.floor(Math.random() * profiles.length)];
+  const candidatePlaces = places.filter((place) => place.type !== 'track');
+  const anchor = candidatePlaces[Math.floor(Math.random() * candidatePlaces.length)] || places[0];
+  const center = (anchor.entryPoint || anchor.position).clone();
+  const marker = createGlowMarker(profile.color, 2.9, 7.2);
+  marker.group.position.set(center.x, terrainHeightAt(center.x, center.z) + 0.15, center.z);
+  state.dynamicEvent.active = true;
+  state.dynamicEvent.type = profile.id;
+  state.dynamicEvent.label = profile.label;
+  state.dynamicEvent.timer = profile.duration;
+  state.dynamicEvent.center = center;
+  state.dynamicEvent.radius = profile.radius;
+  state.dynamicEvent.payoutMultiplier = profile.payoutMultiplier;
+  state.dynamicEvent.xpMultiplier = profile.xpMultiplier;
+  state.dynamicEvent.speedLimit = profile.speedLimit;
+  state.dynamicEvent.locationLabel = anchor.name;
+  state.dynamicEvent.marker = marker;
+  state.dynamicEvent.shownHintAt = -999;
+  rerollRideOffers(true);
+  showToast(`City event: ${profile.label} near ${anchor.name}. Higher ride payouts active.`);
+  markUiDirty();
+}
+
+function updateDynamicEvent(dt) {
+  if (!state.dynamicEvent.active) {
+    state.dynamicEvent.timer = Math.max(0, state.dynamicEvent.timer - dt);
+    if (state.dynamicEvent.timer <= 0) {
+      spawnDynamicEvent();
+    }
+    return;
+  }
+
+  state.dynamicEvent.timer = Math.max(0, state.dynamicEvent.timer - dt);
+  if (state.dynamicEvent.marker?.ring) {
+    state.dynamicEvent.marker.ring.rotation.z += dt * 1.2;
+    state.dynamicEvent.marker.group.position.y += Math.sin(elapsedTime * 2.5) * 0.002;
+  }
+  if (
+    state.mode === 'driving' &&
+    state.dynamicEvent.center &&
+    distanceXZ(player.position, state.dynamicEvent.center) <= state.dynamicEvent.radius + 3 &&
+    elapsedTime - state.dynamicEvent.shownHintAt > 20
+  ) {
+    state.dynamicEvent.shownHintAt = elapsedTime;
+    showToast(`${state.dynamicEvent.label} active. Keep speed near ${Math.round(state.dynamicEvent.speedLimit * 2)} mph.`);
+  }
+  if (state.dynamicEvent.timer <= 0) {
+    const endingLabel = state.dynamicEvent.label;
+    clearDynamicEvent();
+    state.dynamicEvent.timer =
+      DYNAMIC_EVENT_RESPAWN_MIN + Math.random() * (DYNAMIC_EVENT_RESPAWN_MAX - DYNAMIC_EVENT_RESPAWN_MIN);
+    rerollRideOffers(true);
+    showToast(`${endingLabel} ended.`);
+    markUiDirty();
+  }
+}
+
+function updateOnboarding(dt) {
+  if (!state.onboarding.active) {
+    return;
+  }
+  if (state.onboarding.step === 0) {
+    const movingWell = state.mode === 'driving' && Math.abs(player.speed) > 8 && Math.abs(player.steerAngle) > 0.1;
+    state.onboarding.progress = movingWell ? state.onboarding.progress + dt : moveTowards(state.onboarding.progress, 0, dt * 0.7);
+    if (state.onboarding.progress >= 4) {
+      state.onboarding.step = 1;
+      state.onboarding.progress = 0;
+      setGpsTarget('gas');
+      showToast('Tutorial step 2: Follow GPS to Fuel Plaza.');
+      markUiDirty();
+    }
+    return;
+  }
+  if (state.onboarding.step === 1) {
+    const gasPlace = placeById.get('gas');
+    const reference = state.mode === 'driving' ? player.position : avatar.position;
+    if (gasPlace && distanceXZ(reference, gasPlace.entryPoint || gasPlace.position) < gasPlace.radius + 8) {
+      state.onboarding.step = 2;
+      state.onboarding.progress = 0;
+      openCenterPanel('rideshare');
+      showToast('Tutorial step 3: Accept and complete one rideshare trip.');
+      markUiDirty();
+    }
+    return;
+  }
+  if (state.onboarding.step === 2) {
+    if (state.rideshare.completed > state.onboarding.ridesCompletedAtStart) {
+      state.onboarding.active = false;
+      state.onboarding.completed = true;
+      state.onboarding.step = 3;
+      state.onboarding.progress = 1;
+      window.localStorage.setItem('csr_onboarding_done', '1');
+      showToast('Quick start complete. You are ready to drive!');
+      markUiDirty();
+    }
+  }
+}
+
 function updateProgressionSystems(dt) {
   const challenge = state.dailyChallenges;
   if (challenge?.progress && challenge?.completed) {
@@ -2851,12 +4881,21 @@ function updateProgressionSystems(dt) {
       showToast('Coach AI: High wanted level. Use alleys and brake hard into corners.');
     } else if (state.gameMode === 'time-trial' && state.bestLapTime) {
       showToast(`Coach AI: Best lap is ${state.bestLapTime.toFixed(2)}s. Brake later into turn 2.`);
+    } else if (state.vehicleWear.engine < 48 || state.vehicleWear.brakes < 48 || state.vehicleWear.tires < 48) {
+      showToast('Coach AI: Vehicle wear is low. Service at Fuel Plaza or Torque Customs.');
     }
   }
 
   if (dt > 0 && state.mode === 'driving' && state.gameMode === 'free') {
     awardXp(dt * 0.8, 'Driving');
   }
+  refreshUsedMarket(false);
+  updateDynamicEvent(dt);
+  updateRideshare(dt);
+  updateDrivingSchool(dt);
+  updateParkingChallenge(dt);
+  updateConvoyJob(dt);
+  updateOnboarding(dt);
 }
 
 function buyCarModel(carId) {
@@ -2877,6 +4916,10 @@ function buyCarModel(carId) {
     () => {
       state.carModelId = car.id;
       state.selectedCarClass = car.class || state.selectedCarClass;
+      state.carCondition = Math.max(state.carCondition, 92);
+      state.vehicleWear.engine = Math.max(state.vehicleWear.engine, 94);
+      state.vehicleWear.brakes = Math.max(state.vehicleWear.brakes, 94);
+      state.vehicleWear.tires = Math.max(state.vehicleWear.tires, 92);
       applyPlayerCarTuning();
       updatePlayerCosmetics();
     },
@@ -2927,6 +4970,9 @@ function renderPhonePanel() {
         <div class="mini">Model: ${getCarProfile().name}</div>
         <div class="mini">Gas: ${Math.round(state.gas)}/${state.gasMax}</div>
         <div class="mini">Condition: ${Math.round(state.carCondition)}%</div>
+        <div class="mini">Cruise: ${state.cruiseControl.enabled ? `${Math.round(state.cruiseControl.targetSpeed * 2)} mph` : 'Off'}</div>
+        <div class="mini">Wear E/B/T: ${Math.round(state.vehicleWear.engine)} / ${Math.round(state.vehicleWear.brakes)} / ${Math.round(state.vehicleWear.tires)}</div>
+        <div class="mini">Mileage: ${Math.round(state.vehicleWear.mileage)} mi</div>
         <div class="mini">Car Location: ${getDistrictName(player.position)}</div>
         ${
           state.mode === 'walking'
@@ -2940,8 +4986,9 @@ function renderPhonePanel() {
         <div class="mini">Game Mode: ${gameModes.find((mode) => mode.id === state.gameMode)?.name || 'City Free Roam'}</div>
         <div class="mini">Map: ${mapPresets.find((map) => map.id === state.currentMap)?.name || 'City'}</div>
         <div class="mini">Wanted Level: ${state.wantedLevel}</div>
-        <div class="mini">Job: ${state.currentJobId ? placeById.get(state.currentJobId).jobTitle : 'None'}</div>
-        <div class="mini">Job Spots: Corner Cafe, Parcel Point, Tech Hub</div>
+        <div class="mini">License Tier: ${state.drivingSchool.licenseLevel}</div>
+        <div class="mini">Job: ${getCurrentJobLabel()}</div>
+        <div class="mini">Job Spots: Phone Rideshare + Corner Cafe + Parcel Point + Tech Hub</div>
         <div class="mini">Weather: ${state.weather[0].toUpperCase() + state.weather.slice(1)}</div>
         <div class="mini">Time: ${timeLabel}</div>
       </div>
@@ -2949,6 +4996,7 @@ function renderPhonePanel() {
         <strong>GPS</strong>
         <div class="mini">Target: ${getTargetLabel()}</div>
         <div class="mini">Distance: ${targetPosition ? `${gpsDistance}m` : 'Set a route to show arrows'}</div>
+        <div class="mini">Route mode: ${state.gpsRouteMode === 'safest' ? 'Safest' : 'Fastest'}</div>
         <div class="chip-row">
           <button data-phone-action="gps" data-target="gas">Gas</button>
           <button data-phone-action="gps" data-target="dealer">Dealer</button>
@@ -2958,6 +5006,8 @@ function renderPhonePanel() {
           <button data-phone-action="gps" data-target="jail">Jail</button>
           <button data-phone-action="gps" data-target="track">Track</button>
           <button data-phone-action="gps" data-target="car">Car</button>
+          <button data-phone-action="gps-mode" data-mode="fastest">Fastest</button>
+          <button data-phone-action="gps-mode" data-mode="safest">Safest</button>
           <button data-phone-action="gps-clear">Clear</button>
         </div>
       </div>
@@ -2971,19 +5021,52 @@ function renderPhonePanel() {
               : `${Math.min(state.missionProgress, mission.duration).toFixed(1)} / ${mission.duration}s`
             : 'Open missions to pick a contract'
         }</div>
+        <div class="mini">${
+          state.convoyJob.active
+            ? `Convoy ${state.convoyJob.routeIndex + 1}/${state.convoyJob.route.length} | ${Math.max(0, state.convoyJob.segmentLimit - state.convoyJob.segmentTimer).toFixed(1)}s`
+            : 'No convoy active'
+        }</div>
+        <div class="mini">${
+          state.dynamicEvent.active
+            ? `${state.dynamicEvent.label} near ${state.dynamicEvent.locationLabel} (${Math.ceil(state.dynamicEvent.timer)}s)`
+            : `Next city event in ${Math.ceil(state.dynamicEvent.timer)}s`
+        }</div>
+      </div>
+      <div class="action-card">
+        <strong>Rideshare</strong>
+        <div class="mini">Tier: ${RIDESHARE_TIER_LABELS[state.rideshare.tier]} (${Math.round(state.rideshare.stars * 10) / 10}★)</div>
+        <div class="mini">Tier XP: ${Math.round(state.rideshare.xp)}</div>
+        <div class="mini">Status: ${state.rideshare.online ? 'Online' : 'Offline'}</div>
+        <div class="mini">${
+          state.rideshare.activeRide
+            ? `${state.rideshare.activeRide.stage === 'pickup' ? 'Pickup' : 'Dropoff'} ${state.rideshare.activeRide.riderName} | ${Math.max(0, state.rideshare.activeRide.timeLimit - state.rideshare.activeRide.elapsed).toFixed(1)}s`
+            : state.rideshare.online
+              ? `${state.rideshare.offers.length} rides available`
+              : 'Go online to receive rides'
+        }</div>
       </div>
       <div class="action-card">
         <strong>Account</strong>
         <div class="mini">${state.accountName ? `Signed in as ${state.accountName}` : 'Not signed in'}</div>
         <div class="mini">Autosave every ${AUTOSAVE_INTERVAL}s</div>
       </div>
+      <div class="action-card">
+        <strong>Multiplayer</strong>
+        <div class="mini">Status: ${state.multiplayer.enabled ? `In room ${state.multiplayer.roomCode}` : 'Offline'}</div>
+        <div class="mini">Peers: ${state.multiplayer.peerCount}</div>
+      </div>
       <div class="action-list">
         <button data-phone-action="teleport-track">Teleport To Racetrack</button>
         <button data-phone-action="teleport-home">Return To City</button>
         <button data-phone-action="open-modes">Game Modes</button>
+        <button data-phone-action="open-multiplayer">Multiplayer</button>
         <button data-phone-action="open-missions">Missions</button>
+        <button data-phone-action="open-rideshare">Rideshare</button>
+        <button data-phone-action="open-school">Driving School</button>
+        <button data-phone-action="open-replay">Replay/Photo</button>
         <button data-phone-action="open-store">Store</button>
         <button data-phone-action="open-account">Account</button>
+        <button data-phone-action="toggle-audio">${state.audio.enabled ? 'Mute Audio' : 'Enable Audio'}</button>
       </div>
     </div>
   `;
@@ -3028,18 +5111,31 @@ function renderCenterPanel() {
           <strong>Control Chaos Mode</strong>
           <input type="checkbox" data-setting="controlChaosEnabled" ${state.controlChaosEnabled ? 'checked' : ''} />
         </div>
+        <div class="switch-row">
+          <strong>ABS / Traction / Stability</strong>
+          <button data-center-action="open-assists">Open Assists</button>
+        </div>
+        <div class="switch-row">
+          <strong>Audio Enabled</strong>
+          <input type="checkbox" data-setting="audioEnabled" ${state.audio.enabled ? 'checked' : ''} />
+        </div>
+        <div class="settings-row">
+          <label><strong>Audio Volume</strong> <span class="mini">${Math.round(state.audio.masterVolume * 100)}%</span></label>
+          <input type="range" min="0" max="1" step="0.02" value="${state.audio.masterVolume}" data-setting="audioVolume" />
+        </div>
         <div class="action-card">
           <strong>Controls</strong>
           <div class="mini">Drive/Walk: WASD or Arrow Keys</div>
           <div class="mini">Interact: E, Enter/Exit Car: Space, Nitro: F</div>
-          <div class="mini">Phone: P, Modes: G, Missions: M, Store: O, Account: U</div>
+          <div class="mini">Phone: P, Modes: G, Missions: M, School: J, Replay: H</div>
           <div class="mini">Power-Ups: 1 Speed, 2 EMP, 3 Oil, 4 Shield</div>
-          <div class="mini">Backpack: B, Track: T, Reset: R</div>
+          <div class="mini">Backpack: B, Track: T, Cruise: K, Reset: R</div>
         </div>
         <div class="action-list">
           <button data-center-action="device-mode" data-mode="desktop">Use Desktop Controls</button>
           <button data-center-action="device-mode" data-mode="mobile">Use Mobile Controls</button>
           <button data-center-action="device-mode" data-mode="auto">Use Auto Detect</button>
+          <button data-center-action="open-onboarding">Open Quick Start</button>
         </div>
       </div>
     `;
@@ -3080,6 +5176,53 @@ function renderCenterPanel() {
           .join('')}
       </div>
       <div class="mini">Current map: ${mapPresets.find((map) => map.id === state.currentMap)?.name || 'City'} | Chaos mode: ${state.controlChaosEnabled ? 'On' : 'Off'}</div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'multiplayer') {
+    const seasonTop = (state.seasonal.leaderboard || [])
+      .slice(0, 6)
+      .map(
+        (entry, index) => `
+          <div class="leaderboard-row">
+            <span>${index + 1}. ${entry.name}</span>
+            <strong>${Math.round(entry.score || 0)}</strong>
+          </div>
+        `,
+      )
+      .join('');
+    const seasonalTimeTrial = getSeasonTimeTrialBoard(state.currentMap, state.selectedCarClass)
+      .slice(0, 6)
+      .map(
+        (entry, index) => `
+          <div class="leaderboard-row">
+            <span>${index + 1}. ${entry.name}</span>
+            <strong>${Number(entry.bestLap || 0).toFixed(2)}s</strong>
+          </div>
+        `,
+      )
+      .join('');
+    centerPanelEl.innerHTML = `
+      <h2>Multiplayer</h2>
+      <p class="mini">Driving co-op foundation: join the same room code on other tabs/devices to sync cars.</p>
+      <div class="action-card">
+        <strong>Connection</strong>
+        <div class="mini">Room: ${state.multiplayer.enabled ? state.multiplayer.roomCode : 'None'}</div>
+        <div class="mini">Name: ${state.multiplayer.playerName}</div>
+        <div class="mini">Connected drivers: ${state.multiplayer.peerCount + (state.multiplayer.enabled ? 1 : 0)}</div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="mp-join">Join Room</button>
+        <button data-center-action="mp-rename">Set Name</button>
+        <button data-center-action="mp-leave" ${state.multiplayer.enabled ? '' : 'disabled'}>Leave Room</button>
+        <button data-center-action="mp-sync">Sync Now</button>
+      </div>
+      <h3>${state.seasonal.weekLabel || 'Weekly Season'}</h3>
+      <div class="mini">Season score: ${Math.round(state.seasonal.score || 0)}</div>
+      <div class="leaderboard">${seasonTop || '<div class="leaderboard-row"><span>No entries yet</span><strong>0</strong></div>'}</div>
+      <h3>Weekly Time Trial (${mapPresets.find((map) => map.id === state.currentMap)?.name || 'City'} / ${getCarClassForProfile().label})</h3>
+      <div class="leaderboard">${seasonalTimeTrial || '<div class="leaderboard-row"><span>No laps yet</span><strong>--</strong></div>'}</div>
     `;
     return;
   }
@@ -3125,6 +5268,170 @@ function renderCenterPanel() {
       <div class="action-card">
         <strong>Achievements</strong>
         <div class="mini">${state.achievements.length > 0 ? state.achievements.join(', ') : 'No achievements yet.'}</div>
+      </div>
+      <div class="action-card">
+        <strong>Convoy Jobs</strong>
+        <div class="mini">${
+          state.convoyJob.active
+            ? `Checkpoint ${state.convoyJob.routeIndex + 1}/${state.convoyJob.route.length} | Segment time left ${Math.max(0, state.convoyJob.segmentLimit - state.convoyJob.segmentTimer).toFixed(1)}s`
+            : 'Start a long-haul route with timed checkpoints.'
+        }</div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="convoy-start" ${state.convoyJob.active ? 'disabled' : ''}>Start Convoy Job</button>
+        <button data-center-action="convoy-cancel" ${state.convoyJob.active ? '' : 'disabled'}>Cancel Convoy</button>
+      </div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'driving-school') {
+    const lesson = drivingSchoolLessons[state.drivingSchool.lessonIndex];
+    const target = lesson?.target || 0;
+    const progress = state.drivingSchool.progress || 0;
+    centerPanelEl.innerHTML = `
+      <h2>Driving School</h2>
+      <p class="mini">Complete all lessons to improve license tier, payouts, and top speed tuning.</p>
+      <div class="action-card">
+        <strong>License Tier ${state.drivingSchool.licenseLevel}</strong>
+        <div class="mini">Completed runs: ${state.drivingSchool.completedRuns}</div>
+        <div class="mini">${
+          state.drivingSchool.active
+            ? `Current lesson: ${lesson?.label || 'Complete'} (${Math.min(progress, target).toFixed(1)} / ${target})`
+            : 'No active session'
+        }</div>
+        <div class="mini">Violations: ${state.drivingSchool.violations}/3</div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="school-start" ${state.drivingSchool.active ? 'disabled' : ''}>Start Session</button>
+        <button data-center-action="school-stop" ${state.drivingSchool.active ? '' : 'disabled'}>Abort Session</button>
+        <button data-center-action="parking-start">Parking Challenge</button>
+      </div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'replay') {
+    const replayLength = Math.round(state.replay.buffer.length / 60);
+    centerPanelEl.innerHTML = `
+      <h2>Replay & Photo</h2>
+      <p class="mini">Review your recent driving, export clips, and capture screenshots.</p>
+      <div class="action-card">
+        <strong>Replay Buffer</strong>
+        <div class="mini">${replayLength}s captured</div>
+        <div class="mini">${state.replay.active ? `Playing frame ${Math.floor(state.replay.frameIndex)}/${state.replay.playback.length}` : 'Playback stopped'}</div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="replay-play">Play Last Clip</button>
+        <button data-center-action="replay-pause" ${state.replay.active ? '' : 'disabled'}>${state.replay.paused ? 'Resume' : 'Pause'}</button>
+        <button data-center-action="replay-stop" ${state.replay.active ? '' : 'disabled'}>Stop Replay</button>
+        <button data-center-action="photo-mode">${state.replay.photoMode ? 'Disable Photo Mode' : 'Enable Photo Mode'}</button>
+        <button data-center-action="replay-export">Export Replay JSON</button>
+        <button data-center-action="photo-capture">Capture Photo</button>
+      </div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'rideshare') {
+    const tierProgress = getRideshareTierProgress();
+    const activeRide = state.rideshare.activeRide;
+    const offers = (state.rideshare.offers || [])
+      .map((offer) => {
+        const locked = state.rideshare.tier < offer.tierRequired;
+        return `
+          <div class="shop-item">
+            <div>
+              <strong>${offer.riderName} - ${offer.pickup.label} to ${offer.dropoff.label}</strong>
+              <div class="mini">Difficulty ${offer.difficulty} | Distance ${offer.distance}m</div>
+              <div class="mini">Fare ${formatMoney(offer.fare)} | Tier XP ${offer.xp} | Limit ${offer.timeLimit}s</div>
+              <div class="mini">${offer.surge > 1 ? `Surge x${offer.surge}` : 'Standard fare'}${offer.eventLabel ? ` | ${offer.eventLabel}` : ''}</div>
+            </div>
+            <button data-center-action="ride-accept" data-ride-id="${offer.id}" ${locked ? 'disabled' : ''}>
+              ${locked ? `Need ${RIDESHARE_TIER_LABELS[offer.tierRequired]}` : 'Accept Ride'}
+            </button>
+          </div>
+        `;
+      })
+      .join('');
+    centerPanelEl.innerHTML = `
+      <h2>Rideshare Dispatch</h2>
+      <p class="mini">No application needed. Accept rides directly from your phone and tier up with ride XP.</p>
+      <div class="action-card">
+        <strong>Tier: ${RIDESHARE_TIER_LABELS[state.rideshare.tier]}</strong>
+        <div class="mini">Tier XP: ${Math.round(state.rideshare.xp)}${tierProgress.done ? ' (max)' : ` / ${tierProgress.nextFloor}`}</div>
+        <div class="mini">Rating: ${Math.round(state.rideshare.stars * 10) / 10}★ | Completed rides: ${state.rideshare.completed}</div>
+        <div class="mini">Reputation: ${Math.round(state.reputation)} | Drive style: ${state.driveStyle}</div>
+        <div class="mini">Status: ${state.rideshare.online ? 'Online' : 'Offline'}</div>
+        <div class="mini">${state.dynamicEvent.active ? `${state.dynamicEvent.label} near ${state.dynamicEvent.locationLabel} (${Math.ceil(state.dynamicEvent.timer)}s)` : `Next city surge in ${Math.ceil(state.dynamicEvent.timer)}s`}</div>
+      </div>
+      <div class="meter">
+        <label><span>Tier Progress</span><span>${Math.round(tierProgress.progress * 100)}%</span></label>
+        <div class="bar"><div class="bar-fill law" style="width: ${Math.round(tierProgress.progress * 100)}%"></div></div>
+      </div>
+      <div class="action-card">
+        <strong>${activeRide ? 'Active Ride' : 'No Active Ride'}</strong>
+        <div class="mini">${
+          activeRide
+            ? `${activeRide.stage === 'pickup' ? 'Pickup' : 'Dropoff'} ${activeRide.riderName} (${Math.max(0, activeRide.timeLimit - activeRide.elapsed).toFixed(1)}s left)`
+            : 'Accept a ride offer below.'
+        }</div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="ride-cancel" ${activeRide ? '' : 'disabled'}>Cancel Active Ride</button>
+        <button data-center-action="ride-refresh" ${activeRide ? 'disabled' : ''}>Refresh Offers</button>
+        <button data-center-action="ride-online-toggle">${state.rideshare.online ? 'Go Offline' : 'Go Online'}</button>
+        <button data-center-action="cycle-drive-style">Cycle Drive Style</button>
+        <button data-center-action="open-assists">Driving Assists</button>
+      </div>
+      <div class="shop-list">${
+        offers ||
+        (state.rideshare.online
+          ? '<div class="shop-item"><div><strong>No offers right now</strong><div class="mini">Offers refresh automatically.</div></div></div>'
+          : '<div class="shop-item"><div><strong>Rideshare offline</strong><div class="mini">Go online to receive offers.</div></div></div>')
+      }</div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'assists') {
+    centerPanelEl.innerHTML = `
+      <h2>Driving Assists</h2>
+      <p class="mini">Tune handling helpers for ABS, traction, and stability.</p>
+      <div class="switch-row">
+        <strong>ABS Assist</strong>
+        <input type="checkbox" data-setting="assistAbs" ${state.assists.abs ? 'checked' : ''} />
+      </div>
+      <div class="switch-row">
+        <strong>Traction Control</strong>
+        <input type="checkbox" data-setting="assistTraction" ${state.assists.traction ? 'checked' : ''} />
+      </div>
+      <div class="switch-row">
+        <strong>Stability Control</strong>
+        <input type="checkbox" data-setting="assistStability" ${state.assists.stability ? 'checked' : ''} />
+      </div>
+      <div class="action-list">
+        <button data-center-action="cycle-drive-style">Cycle Drive Style (${state.driveStyle})</button>
+        <button data-center-action="open-settings">Back To Settings</button>
+      </div>
+    `;
+    return;
+  }
+
+  if (state.centerPanel === 'onboarding') {
+    centerPanelEl.innerHTML = `
+      <h2>Quick Start</h2>
+      <p class="mini">Set up recommended controls and start a guided drive tutorial.</p>
+      <div class="action-list">
+        <button data-center-action="onboard-recommended">Apply Recommended Settings</button>
+        <button data-center-action="onboard-start">Start Guided Drive</button>
+        <button data-center-action="onboard-skip">Skip Tutorial</button>
+      </div>
+      <div class="action-card">
+        <strong>Guide Steps</strong>
+        <div class="mini">${state.onboarding.step > 0 ? 'Done' : state.onboarding.active ? `In progress ${(state.onboarding.progress / 4 * 100).toFixed(0)}%` : 'Pending'} - 1) Move and steer</div>
+        <div class="mini">${state.onboarding.step > 1 ? 'Done' : state.onboarding.step === 1 ? 'In progress' : 'Pending'} - 2) Set GPS and reach Fuel Plaza</div>
+        <div class="mini">${state.onboarding.completed ? 'Done' : state.onboarding.step === 2 ? 'In progress' : 'Pending'} - 3) Complete one rideshare trip</div>
       </div>
     `;
     return;
@@ -3205,6 +5512,8 @@ function renderCenterPanel() {
     const engineCost = 90 + state.engineLevel * 45;
     const tankCost = 95 + state.tankLevel * 35;
     const bagCost = 60 + Math.max(0, (state.backpackCapacity - 6) / 2) * 25;
+    const engineServiceCost = Math.max(25, Math.round((100 - state.vehicleWear.engine) * 1.4));
+    const brakeServiceCost = Math.max(25, Math.round((100 - state.vehicleWear.brakes) * 1.1));
     centerPanelEl.innerHTML = `
       <h2>${place.name}</h2>
       <p class="mini">Refuel, tune the car, and sell cargo from your backpack.</p>
@@ -3226,6 +5535,14 @@ function renderCenterPanel() {
           <button data-center-action="gas-bag">Buy ${formatMoney(bagCost)}</button>
         </div>
         <div class="shop-item">
+          <div><strong>Engine Service</strong><div class="mini">Wear: ${Math.round(state.vehicleWear.engine)}%</div></div>
+          <button data-center-action="service-engine">Service ${formatMoney(engineServiceCost)}</button>
+        </div>
+        <div class="shop-item">
+          <div><strong>Brake Service</strong><div class="mini">Wear: ${Math.round(state.vehicleWear.brakes)}%</div></div>
+          <button data-center-action="service-brakes">Service ${formatMoney(brakeServiceCost)}</button>
+        </div>
+        <div class="shop-item">
           <div><strong>Sell All Cargo</strong><div class="mini">${state.backpack.length} item(s) ready to cash out.</div></div>
           <button data-center-action="gas-sell-all" ${getSellAllValue() <= 0 ? 'disabled' : ''}>Sell ${formatMoney(getSellAllValue())}</button>
         </div>
@@ -3241,13 +5558,14 @@ function renderCenterPanel() {
 
   if (place.type === 'business') {
     const cooldown = getJobCooldown(place.id);
+    const projectedPay = Math.round(place.pay * (1 + state.drivingSchool.licenseLevel * 0.08));
     centerPanelEl.innerHTML = `
       <h2>${place.name}</h2>
       <p class="mini">Walk inside, apply for the job, and work shifts to earn money.</p>
       <div class="action-list">
         <div class="action-card">
           <strong>${place.jobTitle}</strong>
-          <div class="mini">Pay per shift: ${formatMoney(place.pay)}</div>
+          <div class="mini">Pay per shift: ${formatMoney(projectedPay)}</div>
           <div class="mini">Current Job: ${state.currentJobId === place.id ? 'Hired here' : state.currentJobId ? `Working at ${placeById.get(state.currentJobId).name}` : 'Unemployed'}</div>
         </div>
         <button data-center-action="apply-job" data-place="${place.id}">${state.currentJobId === place.id ? 'Already Hired' : 'Apply For Job'}</button>
@@ -3265,6 +5583,7 @@ function renderCenterPanel() {
     const repairCost = 20 + Math.round((100 - state.carCondition) * 0.9);
     const handlingCost = 95 + state.handlingLevel * 45;
     const armorCost = 110 + state.armorLevel * 55;
+    const tireServiceCost = Math.max(25, Math.round((100 - state.vehicleWear.tires) * 1.2));
     centerPanelEl.innerHTML = `
       <h2>${place.name}</h2>
       <p class="mini">Repair damage and install performance mods.</p>
@@ -3293,6 +5612,10 @@ function renderCenterPanel() {
           <div><strong>Turbo ${state.turboLevel}/3</strong><div class="mini">Adds acceleration and top-speed headroom.</div></div>
           <button data-center-action="mods-turbo" ${state.turboLevel >= 3 ? 'disabled' : ''}>Buy ${formatMoney(120 + state.turboLevel * 70)}</button>
         </div>
+        <div class="shop-item">
+          <div><strong>Tire Service</strong><div class="mini">Wear: ${Math.round(state.vehicleWear.tires)}%</div></div>
+          <button data-center-action="service-tires">Service ${formatMoney(tireServiceCost)}</button>
+        </div>
       </div>
       <div class="action-list">
         <button data-center-action="${state.inInterior ? 'leave-interior' : 'enter-interior'}" data-place="${place.id}">
@@ -3304,6 +5627,7 @@ function renderCenterPanel() {
   }
 
   if (place.type === 'dealer') {
+    refreshUsedMarket(false);
     const carRows = carCatalog
       .map((car) => {
         const lockedByLevel = state.level < (car.unlockLevel || 1);
@@ -3326,11 +5650,30 @@ function renderCenterPanel() {
         `;
       })
       .join('');
+    const usedRows = (state.usedMarket.listings || [])
+      .map((listing) => {
+        const car = carCatalog.find((entry) => entry.id === listing.carId);
+        if (!car) {
+          return '';
+        }
+        return `
+          <div class="shop-item">
+            <div>
+              <strong>${car.name} (Used)</strong>
+              <div class="mini">Mileage: ${listing.mileage}k | Condition: ${listing.condition}% | Class: ${carClassConfig[car.class]?.label || 'Drift'}</div>
+            </div>
+            <button data-center-action="buy-used-car" data-used-id="${listing.id}">Buy ${formatMoney(listing.price)}</button>
+          </div>
+        `;
+      })
+      .join('');
 
     centerPanelEl.innerHTML = `
       <h2>${place.name}</h2>
       <p class="mini">You have to drive here physically, hop out, and buy cars in person.</p>
       <div class="shop-list">${carRows}</div>
+      <h3>Used Market (${state.usedMarket.dateKey || 'Today'})</h3>
+      <div class="shop-list">${usedRows || '<div class="shop-item"><div><strong>No used cars today</strong></div></div>'}</div>
       <div class="settings-grid">
         <div class="settings-row">
           <label><strong>Paint Color</strong></label>
@@ -3351,6 +5694,17 @@ function renderCenterPanel() {
         <button data-center-action="choose-class" data-class="speed">Set Class: Speed</button>
         <button data-center-action="choose-class" data-class="tank">Set Class: Tank</button>
         <button data-center-action="choose-class" data-class="drift">Set Class: Drift</button>
+      </div>
+      <h3>Garage</h3>
+      <div class="action-card">
+        <strong>Owned Garages: ${state.garages.owned}</strong>
+        <div class="mini">Slots: ${state.garages.storedCars.length}/${state.garages.slots}</div>
+        <div class="mini">Stored cars: ${state.garages.storedCars.length ? state.garages.storedCars.map((id) => carCatalog.find((c) => c.id === id)?.name || id).join(', ') : 'None'}</div>
+      </div>
+      <div class="action-list">
+        <button data-center-action="garage-buy">Buy Garage ${formatMoney(280 + state.garages.owned * 190)}</button>
+        <button data-center-action="garage-store">Store Current Car</button>
+        <button data-center-action="garage-retrieve">Retrieve Stored Car</button>
       </div>
       <div class="action-list">
         <button data-center-action="${state.inInterior ? 'leave-interior' : 'enter-interior'}" data-place="${place.id}">
@@ -3392,6 +5746,7 @@ function toggleEnterExitCar() {
     avatar.position.copy(player.position).add(new THREE.Vector3(Math.sin(player.heading) * 3, 0, -Math.cos(player.heading) * 3));
     avatar.heading = player.heading;
     avatar.group.visible = true;
+    state.cruiseControl.enabled = false;
     showToast('You stepped out of the car.');
   } else if (distanceXZ(avatar.position, player.position) < 6) {
     state.mode = 'driving';
@@ -3410,6 +5765,9 @@ function teleportToTrack() {
   if (state.inInterior) {
     leaveInterior();
   }
+  stopReplayClip();
+  state.cruiseControl.enabled = false;
+  markLegitTeleport(8);
   state.mode = 'driving';
   avatar.group.visible = false;
   state.cameraYaw = 0;
@@ -3417,6 +5775,7 @@ function teleportToTrack() {
   player.position.copy(TRACK_SPAWN);
   player.heading = 0;
   player.speed = 0;
+  refreshGpsRoute(true);
   closePanels();
   resetTrackRace();
   showToast('Teleported to Sunset Speedway.');
@@ -3426,6 +5785,9 @@ function teleportHome() {
   if (state.inInterior) {
     leaveInterior();
   }
+  stopReplayClip();
+  state.cruiseControl.enabled = false;
+  markLegitTeleport(8);
   state.mode = 'driving';
   avatar.group.visible = false;
   state.cameraYaw = 0.1;
@@ -3433,6 +5795,7 @@ function teleportHome() {
   player.position.copy(CITY_SPAWN);
   player.heading = 0.1;
   player.speed = 0;
+  refreshGpsRoute(true);
   state.trackRaceActive = false;
   state.raceFinished = false;
   closePanels();
@@ -3565,6 +5928,8 @@ function switchMap(mapId, announce = true) {
   if (!preset) {
     return;
   }
+  stopReplayClip();
+  state.cruiseControl.enabled = false;
   state.currentMap = preset.id;
   state.mapGripFactor = preset.grip || 1;
   state.weather = preset.weather || 'clear';
@@ -3575,6 +5940,7 @@ function switchMap(mapId, announce = true) {
   clearArenaObjects();
 
   const spawn = preset.center.clone();
+  markLegitTeleport(12);
   player.position.copy(spawn);
   player.heading = 0;
   player.speed = 0;
@@ -3602,11 +5968,24 @@ function switchMap(mapId, announce = true) {
   if (announce) {
     showToast(`Loaded map: ${preset.name}. ${preset.description}`);
   }
+  refreshGpsRoute(true);
   applyPlayerCarTuning();
   markUiDirty();
 }
 
 function setGameMode(modeId, options = {}) {
+  if (modeId === 'battle') {
+    modeId = 'race';
+  }
+  if (state.convoyJob.active) {
+    endConvoyJob(false, true);
+  }
+  if (state.drivingSchool.active) {
+    stopDrivingSchool(false, true);
+  }
+  if (state.parkingChallenge.active) {
+    stopParkingChallenge(true);
+  }
   const mode = gameModes.find((entry) => entry.id === modeId);
   if (!mode) {
     return;
@@ -3820,6 +6199,7 @@ function onPlayerTrackLapComplete() {
   const lapTime = Math.max(0.1, elapsedTime - state.lapStartTime);
   state.lapStartTime = elapsedTime;
   if (state.gameMode === 'time-trial') {
+    recordSeasonTimeTrial(lapTime, state.currentMap, state.selectedCarClass);
     if (!state.bestLapTime || lapTime < state.bestLapTime) {
       state.bestLapTime = lapTime;
       state.ghostPlayback = state.ghostRecording.slice();
@@ -3834,6 +6214,7 @@ function onPlayerTrackLapComplete() {
     }
     state.ghostRecording = [];
     state.money += 40;
+    markLegitMoneyEvent(1.8);
     state.lawfulPayout = 100;
     state.speedingTimer = 0;
     state.offRoadTimer = 0;
@@ -3845,6 +6226,7 @@ function onPlayerTrackLapComplete() {
 
   const payout = Math.round(state.lawfulPayout);
   state.money += payout;
+  markLegitMoneyEvent(1.8);
   showToast(
     payout === 100
       ? `Clean lap. You earned the full ${formatMoney(payout)}.`
@@ -3863,6 +6245,7 @@ function onPlayerTrackLapComplete() {
     const bonusByRank = [0, 250, 160, 100, 60];
     const bonus = bonusByRank[rank] || 40;
     state.money += bonus;
+    markLegitMoneyEvent(1.8);
     awardXp(rank === 1 ? 170 : 100, 'Race Finish');
     updateProgressMetric('raceWins', rank === 1 ? 1 : 0);
     showToast(
@@ -3904,6 +6287,9 @@ function updateTrackCheckpoint(vehicle, lapCallback) {
 }
 
 function resetTrackRace() {
+  stopReplayClip();
+  state.cruiseControl.enabled = false;
+  markLegitTeleport(10);
   state.mode = 'driving';
   avatar.group.visible = false;
   state.cameraYaw = 0;
@@ -3915,6 +6301,7 @@ function resetTrackRace() {
   player.routeIndex = 1;
   player.laps = 0;
   player.finishedOrder = null;
+  refreshGpsRoute(true);
 
   const starts = [
     new THREE.Vector3(TRACK_SPAWN.x - 6, 0, TRACK_SPAWN.z),
@@ -3972,9 +6359,13 @@ function performReset() {
     showToast('Track positions reset.');
     return;
   }
+  stopReplayClip();
+  state.cruiseControl.enabled = false;
+  markLegitTeleport(8);
   player.position.copy(CITY_SPAWN);
   player.heading = 0.1;
   player.speed = 0;
+  refreshGpsRoute(true);
   if (state.mode === 'walking') {
     avatar.position.copy(CITY_SPAWN.clone().add(new THREE.Vector3(0, 0, 4)));
   }
@@ -4013,6 +6404,8 @@ function updateWanted(dt) {
 
 function arrestPlayer() {
   const jail = placeById.get('jail');
+  stopReplayClip();
+  state.cruiseControl.enabled = false;
   const fine = 45 + state.wantedLevel * 35;
   state.money = Math.max(0, state.money - fine);
   state.jailTimer = 10;
@@ -4032,6 +6425,7 @@ function arrestPlayer() {
   state.cameraYaw = Math.PI;
   state.cameraPitch = 0.34;
   avatar.group.visible = true;
+  markLegitTeleport(12);
   avatar.position.copy(jail.position).add(new THREE.Vector3(0, 0, 8));
   avatar.heading = Math.PI;
   player.position.copy(jail.position).add(new THREE.Vector3(10, 0, -6));
@@ -4467,6 +6861,23 @@ function updatePoliceCopMode(dt) {
 }
 
 function updateGhostSystem() {
+  if (state.replay.active && state.replay.playback.length > 1) {
+    ghostVehicle.mesh.group.visible = true;
+    if (!state.replay.paused) {
+      state.replay.frameIndex = Math.min(state.replay.frameIndex + 1, state.replay.playback.length - 1);
+    }
+    const frame = state.replay.playback[Math.floor(state.replay.frameIndex)];
+    if (frame) {
+      ghostVehicle.position.set(frame.x, 0, frame.z);
+      ghostVehicle.heading = frame.heading;
+      ghostVehicle.speed = frame.speed;
+    }
+    if (state.replay.frameIndex >= state.replay.playback.length - 1 && !state.replay.paused) {
+      stopReplayClip();
+      showToast('Replay complete.');
+    }
+    return;
+  }
   if (state.gameMode !== 'time-trial' || !state.trackRaceActive) {
     ghostVehicle.mesh.group.visible = false;
     return;
@@ -4657,7 +7068,7 @@ function spawnRoadblockNearPlayer() {
   }
   addShadow(group);
   scene.add(group);
-  roadblocks.push({ group, tag, expiresAt: elapsedTime + 20 });
+  roadblocks.push({ group, center: center.clone(), tag, expiresAt: elapsedTime + 20 });
   showToast('Police deployed a roadblock!', 'bad');
 }
 
@@ -4926,8 +7337,10 @@ function updateCityBonus(dt) {
   state.cityBonusTimer += dt;
   if (state.cityBonusTimer >= CITY_BONUS_INTERVAL) {
     state.cityBonusTimer = 0;
-    const payout = Math.round(state.lawfulPayout);
+    const payout = Math.round(state.lawfulPayout * (1 + state.drivingSchool.licenseLevel * 0.12));
     state.money += payout;
+    markLegitMoneyEvent(1.8);
+    markLegitMoneyEvent(1.8);
     showToast(
       payout === 100
         ? `Safe city driving bonus: ${formatMoney(payout)}.`
@@ -4944,15 +7357,44 @@ function updateDriving(dt) {
   const locked = controlsLocked();
   const onPaved = isPaved(player.position.x, player.position.z);
   const onTrack = isOnRaceTrack(player.position.x, player.position.z);
-  const forwardInput = locked ? 0 : Number(keys.forward) - Number(keys.back) * 0.7;
+  const keyboardForward = Number(keys.forward) - Number(keys.back) * 0.7;
+  const analogForward = state.touchAnalog.throttle + state.gamepad.throttle - (state.touchAnalog.brake + state.gamepad.brake) * 0.8;
+  const brakeInput = locked ? 0 : clamp(Math.max(Number(keys.brake), state.touchAnalog.brake, state.gamepad.brake), 0, 1);
+  const forwardInput = locked ? 0 : clamp(
+    Math.abs(analogForward) > Math.abs(keyboardForward) ? analogForward : keyboardForward,
+    -1,
+    1,
+  );
+  if (state.cruiseControl.enabled) {
+    if (locked) {
+      state.cruiseControl.enabled = false;
+    }
+    if (keys.back || forwardInput < -0.12 || brakeInput > 0.2 || !onPaved) {
+      state.cruiseControl.enabled = false;
+    } else if (Math.abs(forwardInput) < 0.08) {
+      const cruiseDelta = state.cruiseControl.targetSpeed - player.speed;
+      player.speed += clamp(cruiseDelta, -6 * dt, 6 * dt);
+    } else if (forwardInput > 0.15) {
+      state.cruiseControl.targetSpeed = Math.max(state.cruiseControl.targetSpeed, player.speed);
+    }
+  }
   const steerControlSign = state.activeEffects.reverseSteer > 0 ? -1 : 1;
-  const steerInput = locked ? 0 : (Number(keys.right) - Number(keys.left)) * steerControlSign;
+  const keyboardSteer = Number(keys.right) - Number(keys.left);
+  const analogSteer = Math.abs(state.touchAnalog.steer) > Math.abs(state.gamepad.steer)
+    ? state.touchAnalog.steer
+    : state.gamepad.steer;
+  const steerInput = locked ? 0 : clamp(
+    (Math.abs(analogSteer) > Math.abs(keyboardSteer) ? analogSteer : keyboardSteer) * steerControlSign,
+    -1,
+    1,
+  );
   const boostPressed =
     !locked &&
     keys.boost &&
     forwardInput > 0.3 &&
     state.nitroCharge > 1 &&
     state.nitroCooldown <= 0;
+  const driveStyleConfig = getDriveStyleConfig();
 
   applyPlayerCarTuning();
   if (state.tireDamageTimer > 0) {
@@ -4974,7 +7416,10 @@ function updateDriving(dt) {
       (state.tireDamageTimer > 0 ? 0.74 : 1) *
       (state.activeEffects.lowGravity > 0 ? 0.8 : 1);
     const steerStrength = clamp(Math.abs(player.speed) / 10, 0.18, 0.96) * gripFactor;
-    player.heading += player.steerAngle * player.turnRate * dt * steerStrength * (player.speed >= 0 ? 1 : -1);
+    const stabilityAssist = state.assists.stability
+      ? lerp(1, 0.76, clamp(Math.abs(player.speed) / Math.max(player.maxSpeed, 1), 0, 1))
+      : 1;
+    player.heading += player.steerAngle * player.turnRate * dt * steerStrength * stabilityAssist * (player.speed >= 0 ? 1 : -1);
   }
 
   if (forwardInput !== 0 && state.gas > 0.01 && !locked) {
@@ -5001,8 +7446,13 @@ function updateDriving(dt) {
       state.nitroCharge = Math.min(100, state.nitroCharge + (2.2 + state.turboLevel * 0.6) * dt);
     }
   }
-  if (keys.brake) {
-    player.speed = moveTowards(player.speed, 0, 26 * dt);
+  if (brakeInput > 0) {
+    const brakeEffect = lerp(0.68, 1, state.vehicleWear.brakes / 100);
+    player.speed = moveTowards(player.speed, 0, 26 * dt * (0.35 + brakeInput * 0.65) * brakeEffect);
+    if (!state.assists.abs && brakeInput > 0.82 && Math.abs(player.speed) > 18 && onPaved) {
+      player.heading += (Math.random() - 0.5) * 0.08;
+      state.tireDamageTimer = Math.max(state.tireDamageTimer, 1.8);
+    }
   }
   if (!onPaved && player.speed > 16) {
     player.speed = moveTowards(player.speed, 16, 22 * dt);
@@ -5015,6 +7465,10 @@ function updateDriving(dt) {
     Math.abs(player.speed) > 14 &&
     Math.abs(player.steerAngle) > 0.22 &&
     Math.abs(forwardInput) > 0.15;
+  if (state.assists.traction && drifting) {
+    player.steerAngle = moveTowards(player.steerAngle, player.steerAngle * 0.72, dt * 2.4);
+    player.speed = moveTowards(player.speed, player.speed * 0.95, dt * 8);
+  }
   if (drifting) {
     const driftGain = Math.abs(player.speed) * dt * 0.85;
     state.driftDistance += driftGain;
@@ -5052,6 +7506,8 @@ function updateDriving(dt) {
     driftSmokeParticles.push(smoke);
   }
 
+  updateVehicleWear(dt, forwardInput, brakeInput, drifting, onPaved);
+
   const deltaX = Math.cos(player.heading) * player.speed * dt;
   const deltaZ = Math.sin(player.heading) * player.speed * dt;
   const collided = moveBodyWithCollisions(player.position, deltaX, deltaZ, 2.3);
@@ -5066,7 +7522,8 @@ function updateDriving(dt) {
 
   const gasDrain =
     (0.05 + Math.abs(player.speed) / Math.max(player.maxSpeed, 1) * 0.18 + Math.abs(forwardInput) * 0.28) *
-    (1 + state.engineLevel * 0.08 + state.turboLevel * 0.05 + (state.boostActive ? 0.22 : 0));
+    (1 + state.engineLevel * 0.08 + state.turboLevel * 0.05 + (state.boostActive ? 0.22 : 0)) *
+    driveStyleConfig.fuel;
   state.gas = Math.max(0, state.gas - gasDrain * dt);
   if (state.gas <= 0.01 && !state.outOfGasToastShown) {
     state.outOfGasToastShown = true;
@@ -5086,6 +7543,24 @@ function updateDriving(dt) {
     state.speedingTimer = moveTowards(state.speedingTimer, 0, dt * 2);
     if (state.gameMode === 'free' && state.wantedLevel === 0 && onPaved) {
       updateProgressMetric('lawfulSeconds', dt);
+    }
+  }
+
+  if (state.dynamicEvent.active && state.dynamicEvent.center && state.dynamicEvent.speedLimit > 0) {
+    const eventDistance = distanceXZ(player.position, state.dynamicEvent.center);
+    if (eventDistance <= state.dynamicEvent.radius && onPaved) {
+      const eventSpeed = Math.abs(player.speed);
+      if (eventSpeed > state.dynamicEvent.speedLimit + 3) {
+        state.dynamicEvent.overspeedTimer += dt;
+        if (state.dynamicEvent.overspeedTimer > 1.7) {
+          applyPenalty(7, `You ignored the ${state.dynamicEvent.label} speed advisory.`, 0.65);
+          state.dynamicEvent.overspeedTimer = 0;
+        }
+      } else {
+        state.dynamicEvent.overspeedTimer = moveTowards(state.dynamicEvent.overspeedTimer, 0, dt * 2.4);
+      }
+    } else {
+      state.dynamicEvent.overspeedTimer = moveTowards(state.dynamicEvent.overspeedTimer, 0, dt * 2.6);
     }
   }
 
@@ -5125,8 +7600,31 @@ function updateDriving(dt) {
 
 function updateWalking(dt) {
   const locked = controlsLocked();
-  const forwardInput = locked ? 0 : Number(keys.forward) - Number(keys.back);
-  const strafeInput = locked ? 0 : Number(keys.right) - Number(keys.left);
+  const keyboardForward = Number(keys.forward) - Number(keys.back);
+  const keyboardStrafe = Number(keys.right) - Number(keys.left);
+  const analogForward = state.touchAnalog.throttle - state.touchAnalog.brake;
+  const forwardInput = locked
+    ? 0
+    : clamp(
+        Math.abs(analogForward) > Math.abs(state.gamepad.throttle - state.gamepad.brake)
+          ? analogForward
+          : Math.abs(state.gamepad.throttle - state.gamepad.brake) > Math.abs(keyboardForward)
+            ? state.gamepad.throttle - state.gamepad.brake
+          : keyboardForward,
+        -1,
+        1,
+      );
+  const strafeInput = locked
+    ? 0
+    : clamp(
+        Math.abs(state.touchAnalog.steer) > Math.abs(state.gamepad.steer)
+          ? state.touchAnalog.steer
+          : Math.abs(state.gamepad.steer) > Math.abs(keyboardStrafe)
+            ? state.gamepad.steer
+            : keyboardStrafe,
+        -1,
+        1,
+      );
   const forward = new THREE.Vector3(Math.cos(state.cameraYaw), 0, Math.sin(state.cameraYaw));
   const right = new THREE.Vector3(-forward.z, 0, forward.x);
   const moveVector = forward.multiplyScalar(forwardInput).add(right.multiplyScalar(strafeInput));
@@ -5278,7 +7776,7 @@ function getInteractionHint() {
   if (!state.interactionId) {
     const lookHint = state.pointerLocked ? 'Mouse look active.' : 'Click the game to lock the camera.';
     const modeHint =
-      state.gameMode === 'battle' || state.gameMode === 'elimination'
+      state.gameMode === 'elimination'
         ? ' Use powerups with keys 1-4.'
         : state.gameMode === 'time-trial'
           ? ' Beat your ghost lap time.'
@@ -5292,7 +7790,7 @@ function getInteractionHint() {
         ? ' Jobs: Corner Cafe, Parcel Point, Tech Hub.'
         : '';
     return state.mode === 'driving'
-      ? `${lookHint} W/S drive, A/D steer, Shift brakes, F boosts, Space exits.${modeHint}`
+      ? `${lookHint} W/S drive, A/D steer, Shift brakes, F boosts, K cruise, Space exits.${modeHint}`
       : `${lookHint} WASD moves, E interacts, Space enters car.${jobHint}${modeHint}`;
   }
   const place = placeById.get(state.interactionId);
@@ -5322,8 +7820,9 @@ function performInteraction() {
 }
 
 function updateCamera(dt) {
-  const driving = state.mode === 'driving';
-  const source = driving ? player.mesh.group : avatar.group;
+  const replayCamera = state.replay.active && ghostVehicle.mesh.group.visible;
+  const driving = replayCamera || state.mode === 'driving';
+  const source = replayCamera ? ghostVehicle.mesh.group : driving ? player.mesh.group : avatar.group;
   const yaw = state.cameraYaw;
   const pitch = clamp(state.cameraPitch, 0.18, 0.8);
   const radius = driving ? 12 : 7.2;
@@ -5339,7 +7838,33 @@ function updateCamera(dt) {
   camera.lookAt(lookTarget);
 }
 
+function updateGamepadInput() {
+  const gamepads = navigator.getGamepads?.();
+  if (!gamepads) {
+    state.gamepad.connected = false;
+    state.gamepad.steer = 0;
+    state.gamepad.throttle = 0;
+    state.gamepad.brake = 0;
+    return;
+  }
+  const pad = Array.from(gamepads).find((entry) => entry && entry.connected);
+  if (!pad) {
+    state.gamepad.connected = false;
+    state.gamepad.steer = 0;
+    state.gamepad.throttle = 0;
+    state.gamepad.brake = 0;
+    return;
+  }
+  state.gamepad.connected = true;
+  state.gamepad.steer = clamp(pad.axes?.[0] || 0, -1, 1);
+  const rightTrigger = pad.buttons?.[7]?.value || 0;
+  const leftTrigger = pad.buttons?.[6]?.value || 0;
+  state.gamepad.throttle = clamp(rightTrigger, 0, 1);
+  state.gamepad.brake = clamp(leftTrigger, 0, 1);
+}
+
 function updateMarkers() {
+  refreshGpsRoute(false);
   const targetPosition = getTargetPosition();
   const reference = state.mode === 'driving' ? player.position : avatar.position;
   gpsMarker.group.visible = Boolean(targetPosition);
@@ -5352,8 +7877,13 @@ function updateMarkers() {
     gpsMarker.ring.rotation.z += 0.01;
   }
 
-  const direction = targetPosition
-    ? new THREE.Vector3(targetPosition.x - reference.x, 0, targetPosition.z - reference.z)
+  const waypoint = getCurrentGpsWaypoint() || targetPosition;
+  if (waypoint && targetPosition && elapsedTime - state.gpsLastRecomputeAt > 1.2 && segmentBlocked(reference, waypoint)) {
+    refreshGpsRoute(true);
+    showToast('GPS rerouted around a road hazard.');
+  }
+  const direction = waypoint
+    ? new THREE.Vector3(waypoint.x - reference.x, 0, waypoint.z - reference.z)
     : null;
   const hasDirection = direction && direction.length() > 8;
   if (hasDirection) {
@@ -5428,8 +7958,9 @@ function renderHud() {
         .join('')
     : `
       <div class="leaderboard-row"><span>Wanted Level</span><strong>${state.wantedLevel}</strong></div>
-      <div class="leaderboard-row"><span>Job</span><strong>${state.currentJobId ? placeById.get(state.currentJobId).jobTitle : 'None'}</strong></div>
-      <div class="leaderboard-row"><span>Job Places</span><strong>Cafe, Parcel, Tech Hub</strong></div>
+      <div class="leaderboard-row"><span>Job</span><strong>${getCurrentJobLabel()}</strong></div>
+      <div class="leaderboard-row"><span>Job Places</span><strong>Phone Ride, Cafe, Parcel, Tech</strong></div>
+      <div class="leaderboard-row"><span>City Event</span><strong>${state.dynamicEvent.active ? state.dynamicEvent.label : 'None'}</strong></div>
       <div class="leaderboard-row"><span>Location</span><strong>${getDistrictName(reference)}</strong></div>
     `;
 
@@ -5439,6 +7970,7 @@ function renderHud() {
       <div class="stat-line"><span>Mode</span><strong>${state.mode === 'driving' ? 'Driving' : 'Walking'}</strong></div>
       <div class="stat-line"><span>Game</span><strong>${modeLabel}</strong></div>
       <div class="stat-line"><span>GPS</span><strong>${getTargetLabel()}</strong></div>
+      <div class="stat-line"><span>Route</span><strong>${state.gpsRouteMode === 'safest' ? 'Safe' : 'Fast'}</strong></div>
       <div class="stat-line"><span>FPS</span><strong>${Math.round(state.fps)}</strong></div>
       <div class="stat-line"><span>Level</span><strong>${state.level}</strong></div>
       <div class="stat-line"><span>XP</span><strong>${Math.round(state.xp)}/${Math.round(xpTarget)}</strong></div>
@@ -5448,6 +7980,8 @@ function renderHud() {
       <div class="stat-line"><span>Car</span><strong>${getCarProfile().name}</strong></div>
       <div class="stat-line"><span>Speed</span><strong>${speedDisplay} mph</strong></div>
       <div class="stat-line"><span>Limit</span><strong>${SPEED_LIMIT * 2} mph</strong></div>
+      <div class="stat-line"><span>Cruise</span><strong>${state.cruiseControl.enabled ? `${Math.round(state.cruiseControl.targetSpeed * 2)} mph` : 'Off'}</strong></div>
+      <div class="stat-line"><span>Wear E/B/T</span><strong>${Math.round(state.vehicleWear.engine)}/${Math.round(state.vehicleWear.brakes)}/${Math.round(state.vehicleWear.tires)}</strong></div>
       <div class="meters">
         <div class="meter">
           <label><span>Condition</span><span>${Math.round(state.carCondition)}%</span></label>
@@ -5473,6 +8007,8 @@ function renderHud() {
       <div class="stat-line"><span>Class</span><strong>${getCarClassForProfile().label}</strong></div>
       <div class="stat-line"><span>HP</span><strong>${Math.round(state.arenaPlayerHp)}</strong></div>
       <div class="stat-line"><span>Mission</span><strong>${activeMission ? activeMission.title : 'None'}</strong></div>
+      <div class="stat-line"><span>Convoy</span><strong>${state.convoyJob.active ? `${state.convoyJob.routeIndex + 1}/${state.convoyJob.route.length}` : 'Off'}</strong></div>
+      <div class="stat-line"><span>License</span><strong>Tier ${state.drivingSchool.licenseLevel}</strong></div>
       <div class="stat-line"><span>Progress</span><strong>${activeMissionProgress}</strong></div>
       <div class="stat-line"><span>Lap Time</span><strong>${state.gameMode === 'time-trial' ? `${state.currentLapTime.toFixed(2)}s` : '--'}</strong></div>
       <div class="stat-line"><span>Best Ghost</span><strong>${state.bestLapTime ? `${state.bestLapTime.toFixed(2)}s` : '--'}</strong></div>
@@ -5530,6 +8066,39 @@ function handleCenterPanelAction(action, dataset) {
     renderCenterPanel();
     return;
   }
+  if (action === 'mp-join') {
+    const roomCode = window.prompt('Enter room code (letters/numbers):', state.multiplayer.roomCode || 'CITY-RUSH');
+    if (!roomCode) {
+      return;
+    }
+    joinMultiplayerRoom(roomCode, state.multiplayer.playerName);
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'mp-rename') {
+    const name = window.prompt('Driver name:', state.multiplayer.playerName || 'Driver');
+    if (!name) {
+      return;
+    }
+    state.multiplayer.playerName = name.trim().slice(0, 16) || 'Driver';
+    window.localStorage.setItem(MULTIPLAYER_NAME_KEY, state.multiplayer.playerName);
+    if (state.multiplayer.enabled) {
+      sendMultiplayerState(true);
+    }
+    renderCenterPanel();
+    markUiDirty();
+    return;
+  }
+  if (action === 'mp-leave') {
+    leaveMultiplayerRoom();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'mp-sync') {
+    sendMultiplayerState(true);
+    showToast('Multiplayer state synced.');
+    return;
+  }
   if (action === 'stripe-open') {
     openStripeCheckout(dataset.link);
     return;
@@ -5544,6 +8113,76 @@ function handleCenterPanelAction(action, dataset) {
   }
   if (action === 'buy-car') {
     buyCarModel(dataset.car);
+    return;
+  }
+  if (action === 'buy-used-car') {
+    const listing = (state.usedMarket.listings || []).find((entry) => entry.id === dataset.usedId);
+    if (!listing) {
+      showToast('Used listing no longer available.', 'bad');
+      return;
+    }
+    const car = carCatalog.find((entry) => entry.id === listing.carId);
+    if (!car) {
+      return;
+    }
+    buyUpgrade(
+      listing.price,
+      () => {
+        state.carModelId = car.id;
+        state.selectedCarClass = car.class || state.selectedCarClass;
+        state.carCondition = clamp(listing.condition, 35, 100);
+        state.vehicleWear.engine = clamp(listing.condition - 8, 24, 100);
+        state.vehicleWear.brakes = clamp(listing.condition - 4, 24, 100);
+        state.vehicleWear.tires = clamp(listing.condition - 10, 20, 100);
+        state.vehicleWear.mileage += listing.mileage * 12;
+        state.usedMarket.listings = state.usedMarket.listings.filter((entry) => entry.id !== listing.id);
+        applyPlayerCarTuning();
+      },
+      `You bought used ${car.name}.`,
+    );
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'garage-buy') {
+    const cost = 280 + state.garages.owned * 190;
+    buyUpgrade(
+      cost,
+      () => {
+        state.garages.owned += 1;
+        state.garages.slots += 2;
+      },
+      'Garage purchased. +2 storage slots.',
+    );
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'garage-store') {
+    if (state.garages.storedCars.length >= state.garages.slots) {
+      showToast('Garage is full. Buy more slots.', 'bad');
+      return;
+    }
+    state.garages.storedCars.push(state.carModelId);
+    showToast(`${getCarProfile().name} stored in garage.`);
+    renderCenterPanel();
+    markUiDirty();
+    return;
+  }
+  if (action === 'garage-retrieve') {
+    if (state.garages.storedCars.length === 0) {
+      showToast('No stored cars available.', 'bad');
+      return;
+    }
+    const retrieved = state.garages.storedCars.shift();
+    if (carCatalog.some((entry) => entry.id === retrieved)) {
+      state.carModelId = retrieved;
+      const car = carCatalog.find((entry) => entry.id === retrieved);
+      state.selectedCarClass = car?.class || state.selectedCarClass;
+      applyPlayerCarTuning();
+      updatePlayerCosmetics();
+      showToast(`${car?.name || 'Car'} retrieved from garage.`);
+    }
+    renderCenterPanel();
+    markUiDirty();
     return;
   }
   if (action === 'upgrade-spoiler') {
@@ -5578,6 +8217,21 @@ function handleCenterPanelAction(action, dataset) {
     );
     return;
   }
+  if (action === 'service-engine') {
+    serviceWearPart('engine');
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'service-brakes') {
+    serviceWearPart('brakes');
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'service-tires') {
+    serviceWearPart('tires');
+    renderCenterPanel();
+    return;
+  }
   if (action === 'choose-class') {
     if (!carClassConfig[dataset.class]) {
       return;
@@ -5603,6 +8257,140 @@ function handleCenterPanelAction(action, dataset) {
   }
   if (action === 'mission-abandon') {
     abandonMission();
+    return;
+  }
+  if (action === 'ride-accept') {
+    startRideshareRide(dataset.rideId);
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'ride-cancel') {
+    cancelRideshareRide('Ride canceled by driver.');
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'ride-refresh') {
+    rerollRideOffers(true);
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'ride-online-toggle') {
+    state.rideshare.online = !state.rideshare.online;
+    if (!state.rideshare.online && state.rideshare.activeRide) {
+      cancelRideshareRide('You went offline. Ride canceled.');
+    }
+    if (!state.rideshare.online) {
+      state.rideshare.offers = [];
+      state.rideshare.rerollTimer = 0;
+    }
+    if (state.rideshare.online && !state.rideshare.activeRide && (!state.rideshare.offers || state.rideshare.offers.length === 0)) {
+      rerollRideOffers(true);
+    }
+    showToast(state.rideshare.online ? 'Rideshare is online.' : 'Rideshare is offline.');
+    renderCenterPanel();
+    markUiDirty();
+    return;
+  }
+  if (action === 'cycle-drive-style') {
+    cycleDriveStyle();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'open-assists') {
+    openCenterPanel('assists');
+    return;
+  }
+  if (action === 'open-onboarding') {
+    openCenterPanel('onboarding');
+    return;
+  }
+  if (action === 'onboard-recommended') {
+    state.lookSensitivity = 1;
+    state.steeringSensitivity = 1.35;
+    state.invertLookY = false;
+    state.audio.enabled = true;
+    state.audio.masterVolume = 0.64;
+    state.driveStyle = 'normal';
+    persistSettings();
+    applyPlayerCarTuning();
+    showToast('Recommended settings applied.');
+    renderCenterPanel();
+    markUiDirty();
+    return;
+  }
+  if (action === 'onboard-start') {
+    state.onboarding.active = true;
+    state.onboarding.completed = false;
+    state.onboarding.step = 0;
+    state.onboarding.progress = 0;
+    state.onboarding.ridesCompletedAtStart = state.rideshare.completed;
+    state.rideshare.online = true;
+    setGpsTarget('gas');
+    closePanels();
+    showToast('Tutorial started: move and steer for a few seconds.');
+    return;
+  }
+  if (action === 'onboard-skip') {
+    state.onboarding.active = false;
+    state.onboarding.completed = true;
+    state.onboarding.progress = 0;
+    window.localStorage.setItem('csr_onboarding_done', '1');
+    closePanels();
+    showToast('Tutorial skipped.');
+    return;
+  }
+  if (action === 'convoy-start') {
+    startConvoyJob();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'convoy-cancel') {
+    endConvoyJob(false);
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'school-start') {
+    startDrivingSchool();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'school-stop') {
+    stopDrivingSchool(false);
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'parking-start') {
+    startParkingChallenge();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'replay-play') {
+    playReplayClip();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'replay-pause') {
+    state.replay.paused = !state.replay.paused;
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'replay-stop') {
+    stopReplayClip();
+    renderCenterPanel();
+    return;
+  }
+  if (action === 'replay-export') {
+    exportReplayClip();
+    return;
+  }
+  if (action === 'photo-mode') {
+    setPhotoMode(!state.replay.photoMode);
+    renderCenterPanel();
+    markUiDirty();
+    return;
+  }
+  if (action === 'photo-capture') {
+    capturePhoto();
     return;
   }
   if (action === 'account-register') {
@@ -5654,6 +8442,14 @@ function handlePhoneAction(action, dataset) {
     setGpsTarget(dataset.target);
     return;
   }
+  if (action === 'gps-mode') {
+    state.gpsRouteMode = dataset.mode === 'safest' ? 'safest' : 'fastest';
+    refreshGpsRoute(true);
+    showToast(`GPS route mode: ${state.gpsRouteMode === 'safest' ? 'Safest' : 'Fastest'}.`);
+    renderPhonePanel();
+    markUiDirty();
+    return;
+  }
   if (action === 'gps-clear') {
     setGpsTarget(null);
     return;
@@ -5670,8 +8466,28 @@ function handlePhoneAction(action, dataset) {
     openCenterPanel('game-modes');
     return;
   }
+  if (action === 'open-multiplayer') {
+    openCenterPanel('multiplayer');
+    return;
+  }
   if (action === 'open-missions') {
     openCenterPanel('missions');
+    return;
+  }
+  if (action === 'open-rideshare') {
+    state.rideshare.online = true;
+    if (!state.rideshare.offers?.length && !state.rideshare.activeRide) {
+      rerollRideOffers(true);
+    }
+    openCenterPanel('rideshare');
+    return;
+  }
+  if (action === 'open-school') {
+    openCenterPanel('driving-school');
+    return;
+  }
+  if (action === 'open-replay') {
+    openCenterPanel('replay');
     return;
   }
   if (action === 'open-store') {
@@ -5680,6 +8496,22 @@ function handlePhoneAction(action, dataset) {
   }
   if (action === 'open-account') {
     openCenterPanel('account');
+    return;
+  }
+  if (action === 'toggle-audio') {
+    state.audio.enabled = !state.audio.enabled;
+    if (!state.audio.enabled && audioMasterGain) {
+      audioMasterGain.gain.value = 0;
+    } else {
+      initAudioIfNeeded();
+      if (audioMasterGain) {
+        audioMasterGain.gain.value = state.audio.masterVolume;
+      }
+    }
+    persistSettings();
+    renderPhonePanel();
+    showToast(state.audio.enabled ? 'Audio enabled.' : 'Audio muted.');
+    markUiDirty();
   }
 }
 
@@ -5690,8 +8522,20 @@ function handleAction(action) {
     openCenterPanel('settings');
   } else if (action === 'modes') {
     openCenterPanel('game-modes');
+  } else if (action === 'multiplayer') {
+    openCenterPanel('multiplayer');
   } else if (action === 'missions') {
     openCenterPanel('missions');
+  } else if (action === 'rideshare') {
+    state.rideshare.online = true;
+    if (!state.rideshare.offers?.length && !state.rideshare.activeRide) {
+      rerollRideOffers(true);
+    }
+    openCenterPanel('rideshare');
+  } else if (action === 'school') {
+    openCenterPanel('driving-school');
+  } else if (action === 'replay') {
+    openCenterPanel('replay');
   } else if (action === 'store') {
     openCenterPanel('premium-store');
   } else if (action === 'account') {
@@ -5736,8 +8580,19 @@ function setupInput() {
   };
 
   const normalizeKey = (key) => (key.length === 1 ? key.toLowerCase() : key);
+  let audioPrimed = false;
+  const primeAudio = () => {
+    if (audioPrimed) {
+      return;
+    }
+    audioPrimed = true;
+    initAudioIfNeeded();
+  };
+  window.addEventListener('pointerdown', primeAudio, { once: true, passive: true });
+  window.addEventListener('keydown', primeAudio, { once: true });
 
   canvas.addEventListener('click', () => {
+    primeAudio();
     if (document.pointerLockElement !== canvas) {
       canvas.requestPointerLock?.();
     }
@@ -5763,6 +8618,7 @@ function setupInput() {
   });
 
   window.addEventListener('keydown', (event) => {
+    primeAudio();
     const key = normalizeKey(event.key);
     if (movementBindings[key]) {
       keys[movementBindings[key]] = true;
@@ -5781,7 +8637,10 @@ function setupInput() {
     if (key === 'b') toggleBackpack();
     if (key === 'p') togglePhone();
     if (key === 'g') openCenterPanel('game-modes');
+    if (key === 'l') openCenterPanel('multiplayer');
     if (key === 'm') openCenterPanel('missions');
+    if (key === 'j') openCenterPanel('driving-school');
+    if (key === 'h') openCenterPanel('replay');
     if (key === 'o') openCenterPanel('premium-store');
     if (key === 'u') openCenterPanel('account');
     if (key === '1') usePowerup('speed');
@@ -5793,7 +8652,16 @@ function setupInput() {
       showToast(`Control Chaos ${state.controlChaosEnabled ? 'enabled' : 'disabled'}.`);
       markUiDirty();
     }
+    if (key === 'v') {
+      state.audio.enabled = !state.audio.enabled;
+      if (state.audio.enabled) {
+        initAudioIfNeeded();
+      }
+      persistSettings();
+      showToast(state.audio.enabled ? 'Audio enabled.' : 'Audio muted.');
+    }
     if (key === 't') teleportToTrack();
+    if (key === 'k') toggleCruiseControl();
     if (key === 'r') performReset();
     if (key === 'n') {
       if (state.trackRaceActive || distanceXZ(player.position, TRACK_CENTER) < 180) {
@@ -5816,6 +8684,12 @@ function setupInput() {
     Object.keys(keys).forEach((key) => {
       keys[key] = false;
     });
+    state.touchAnalog.steer = 0;
+    state.touchAnalog.throttle = 0;
+    state.touchAnalog.brake = 0;
+    if (touchSteerEl) touchSteerEl.value = '0';
+    if (touchThrottleEl) touchThrottleEl.value = '0';
+    if (touchBrakeEl) touchBrakeEl.value = '0';
   });
 
   touchControlsEl.querySelectorAll('button').forEach((button) => {
@@ -5840,6 +8714,42 @@ function setupInput() {
         handleAction(action);
       });
     }
+  });
+
+  const bindTouchAnalog = (element, key, { min = 0, max = 1, rest = 0 } = {}) => {
+    if (!element) {
+      return;
+    }
+    const sync = () => {
+      const value = Number(element.value);
+      state.touchAnalog[key] = clamp(Number.isFinite(value) ? value : rest, min, max);
+    };
+    const reset = () => {
+      element.value = String(rest);
+      state.touchAnalog[key] = rest;
+    };
+    element.addEventListener('input', sync);
+    element.addEventListener('change', sync);
+    element.addEventListener('pointerup', reset);
+    element.addEventListener('pointercancel', reset);
+    element.addEventListener('touchend', reset, { passive: true });
+    element.addEventListener('mouseleave', reset);
+    sync();
+  };
+
+  bindTouchAnalog(touchSteerEl, 'steer', { min: -1, max: 1, rest: 0 });
+  bindTouchAnalog(touchThrottleEl, 'throttle', { min: 0, max: 1, rest: 0 });
+  bindTouchAnalog(touchBrakeEl, 'brake', { min: 0, max: 1, rest: 0 });
+
+  window.addEventListener('gamepadconnected', () => {
+    showToast('Gamepad connected.');
+  });
+  window.addEventListener('gamepaddisconnected', () => {
+    state.gamepad.connected = false;
+    state.gamepad.steer = 0;
+    state.gamepad.throttle = 0;
+    state.gamepad.brake = 0;
+    showToast('Gamepad disconnected.', 'bad');
   });
 
   actionBarEl.addEventListener('click', (event) => {
@@ -5868,6 +8778,11 @@ function setupInput() {
         state.lookSensitivity = clamp(value, 0.4, 2.5);
       } else if (key === 'steeringSensitivity') {
         state.steeringSensitivity = clamp(value, 0.6, 2);
+      } else if (key === 'audioVolume') {
+        state.audio.masterVolume = clamp(value, 0, 1);
+        if (audioMasterGain) {
+          audioMasterGain.gain.value = state.audio.enabled ? state.audio.masterVolume : 0;
+        }
       } else {
         return false;
       }
@@ -5886,6 +8801,37 @@ function setupInput() {
     }
     if (target.matches('input[type="checkbox"]') && key === 'controlChaosEnabled') {
       state.controlChaosEnabled = target.checked;
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
+    if (target.matches('input[type="checkbox"]') && key === 'audioEnabled') {
+      state.audio.enabled = target.checked;
+      if (state.audio.enabled) {
+        initAudioIfNeeded();
+      }
+      if (audioMasterGain) {
+        audioMasterGain.gain.value = state.audio.enabled ? state.audio.masterVolume : 0;
+      }
+      persistSettings();
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
+    if (target.matches('input[type="checkbox"]') && key === 'assistAbs') {
+      state.assists.abs = target.checked;
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
+    if (target.matches('input[type="checkbox"]') && key === 'assistTraction') {
+      state.assists.traction = target.checked;
+      renderCenterPanel();
+      markUiDirty();
+      return true;
+    }
+    if (target.matches('input[type="checkbox"]') && key === 'assistStability') {
+      state.assists.stability = target.checked;
       renderCenterPanel();
       markUiDirty();
       return true;
@@ -5945,6 +8891,7 @@ function setupLighting() {
 
 function populateWorld() {
   places.forEach((place) => createSpecialPlace(place));
+  createParkingSpots();
   createInteriors();
   createMapLandmarks();
   createPickups();
@@ -5952,7 +8899,15 @@ function populateWorld() {
   applyPlayerCarTuning();
   updatePlayerCosmetics();
   loadInitialAccountState();
+  ensureSeasonState();
+  updateSeasonLeaderboard();
+  refreshUsedMarket(true);
+  rerollRideOffers(true);
+  state.rideshare.online = true;
+  state.dynamicEvent.timer =
+    DYNAMIC_EVENT_RESPAWN_MIN + Math.random() * (DYNAMIC_EVENT_RESPAWN_MAX - DYNAMIC_EVENT_RESPAWN_MIN);
   switchMap(state.currentMap || 'city', false);
+  refreshGpsRoute(true);
   state.cameraYaw = player.heading;
   state.cameraPitch = 0.38;
   updateVehicleTransform(player, 1 / 60);
@@ -5981,6 +8936,7 @@ function animate() {
   state.fps = lerp(state.fps, instantFps, 0.12);
 
   ensureCityChunks(state.mode === 'driving' ? player.position : avatar.position);
+  updateGamepadInput();
   updateWorldAtmosphere(dt);
   decayActiveEffects(dt);
   updateControlChaos(dt);
@@ -6000,6 +8956,9 @@ function animate() {
   } else {
     updateWalking(dt);
   }
+  updateReplayBuffer();
+  runAuthorityGuard(dt);
+  updateMultiplayer(dt);
 
   if (state.trackRaceActive) {
     trackBots.forEach((bot) => updateTrackBot(bot, dt));
@@ -6047,6 +9006,7 @@ function animate() {
   }
   updateAvatarTransform();
   updateCamera(dt);
+  updateAudio(dt);
   renderMinimap();
 
   if (state.accountId) {
@@ -6066,6 +9026,7 @@ populateWorld();
 setupInput();
 window.addEventListener('resize', handleResize);
 window.addEventListener('beforeunload', () => {
+  leaveMultiplayerRoom(true);
   saveToActiveAccount(false);
 });
 renderUi();

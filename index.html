@@ -26,8 +26,11 @@
           <span><strong>Phone:</strong> P</span>
           <span><strong>Game Modes:</strong> G</span>
           <span><strong>Missions:</strong> M</span>
+          <span><strong>Driving School:</strong> J</span>
+          <span><strong>Replay / Photo:</strong> H</span>
           <span><strong>Store:</strong> O</span>
           <span><strong>Account:</strong> U</span>
+          <span><strong>Cruise Control:</strong> K</span>
           <span><strong>Power-Ups:</strong> 1/2/3/4</span>
           <span><strong>Control Chaos Toggle:</strong> C</span>
           <span><strong>Racetrack:</strong> T</span>
@@ -38,7 +41,11 @@
       <div class="action-bar" id="action-bar">
         <button data-action="phone">Phone</button>
         <button data-action="modes">Modes</button>
+        <button data-action="multiplayer">MP</button>
         <button data-action="missions">Missions</button>
+        <button data-action="rideshare">Ride</button>
+        <button data-action="school">School</button>
+        <button data-action="replay">Replay</button>
         <button data-action="store">Store</button>
         <button data-action="account">Account</button>
         <button data-action="settings">Settings</button>
@@ -60,7 +67,11 @@
         <button data-action="interact" aria-label="Interact">Use</button>
         <button data-action="phone" aria-label="Open phone">Phone</button>
         <button data-action="modes" aria-label="Open game modes">Modes</button>
+        <button data-action="multiplayer" aria-label="Open multiplayer">MP</button>
         <button data-action="missions" aria-label="Open missions">Missions</button>
+        <button data-action="rideshare" aria-label="Open rideshare">Ride</button>
+        <button data-action="school" aria-label="Open driving school">School</button>
+        <button data-action="replay" aria-label="Open replay and photo">Replay</button>
         <button data-action="store" aria-label="Open store">Store</button>
         <button data-action="account" aria-label="Open account">Account</button>
         <button data-action="settings" aria-label="Open settings">Settings</button>
@@ -71,6 +82,18 @@
         <button data-action="power-emp" aria-label="Use EMP">P2</button>
         <button data-action="power-oil" aria-label="Use oil spill">P3</button>
         <button data-action="power-shield" aria-label="Use shield">P4</button>
+      </div>
+      <div class="touch-analog" id="touch-analog">
+        <label class="mini" for="touch-steer">Steer</label>
+        <input id="touch-steer" type="range" min="-1" max="1" step="0.01" value="0" />
+        <div class="analog-throttle">
+          <label class="mini" for="touch-throttle">Throttle</label>
+          <input id="touch-throttle" type="range" min="0" max="1" step="0.01" value="0" />
+        </div>
+        <div class="analog-throttle">
+          <label class="mini" for="touch-brake">Brake</label>
+          <input id="touch-brake" type="range" min="0" max="1" step="0.01" value="0" />
+        </div>
       </div>
     </div>
   </body>
